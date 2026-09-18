@@ -9,7 +9,12 @@ use mono_move_core::{
 };
 use mono_move_global_context::ExecutionGuard;
 use mono_move_runtime::{serialize, InterpreterContext};
-use move_core_types::language_storage::{StructTag, TypeTag};
+use move_core_types::{
+    account_address::AccountAddress,
+    language_storage::{StructTag, TypeTag},
+    move_resource::MoveStructType,
+};
+use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, HashMap};
 
 /// Trait extending the runtime's [`ResourceProvider`] interface with additional capabilities to
@@ -23,30 +28,57 @@ pub trait AptosDataProvider: ResourceProvider {
     ) -> Result<Option<GroupMembers>, ResourceProviderError>;
 }
 
-/// Reads the on-chain config `T` through `interp`, so the read is recorded
-/// like one made by Move code.
+/// The BCS bytes of the resource `tag` at `address`, read through `interp` so
+/// the read is recorded like one made by Move code. `None` if there is none.
 //
 // TODO(perf): the value goes through BCS; decode the flat value directly.
-// TODO(perf): the config's type is interned on every call; intern it once.
-pub(crate) fn read_config<T: OnChainConfig>(
+// TODO(perf): the type is interned on every call; intern it once.
+fn read_resource_bytes(
     interp: &mut InterpreterContext<'_>,
     guard: &ExecutionGuard<'_>,
-) -> Result<Option<T>, ResourceProviderError> {
-    let ty = intern_type_tag(&TypeTag::Struct(Box::new(T::struct_tag())), guard)
+    address: AccountAddress,
+    tag: StructTag,
+) -> Result<Option<Vec<u8>>, ResourceProviderError> {
+    let ty = intern_type_tag(&TypeTag::Struct(Box::new(tag)), guard)
         .map_err(|e| ResourceProviderError::InvariantViolation(format!("{e:#}")))?;
     let Some(ptr) = interp
-        .read_resource(*T::address(), ty)
+        .read_resource(address, ty)
         .map_err(|e| ResourceProviderError::InvariantViolation(e.to_string()))?
     else {
         return Ok(None);
     };
     // SAFETY: the read-write set pins `ptr` for as long as `interp` lives, and
     // `read_resource` published the layout of `ty`.
-    let bytes = unsafe { serialize(guard, ptr.as_ptr(), ty) }
-        .map_err(|e| ResourceProviderError::InvariantViolation(e.to_string()))?;
-    T::deserialize_into_config(&bytes)
+    unsafe { serialize(guard, ptr.as_ptr(), ty) }
         .map(Some)
-        .map_err(|e| ResourceProviderError::InvariantViolation(format!("{e:#}")))
+        .map_err(|e| ResourceProviderError::InvariantViolation(e.to_string()))
+}
+
+/// Reads the on-chain config `T` through `interp`.
+pub(crate) fn read_config<T: OnChainConfig>(
+    interp: &mut InterpreterContext<'_>,
+    guard: &ExecutionGuard<'_>,
+) -> Result<Option<T>, ResourceProviderError> {
+    read_resource_bytes(interp, guard, *T::address(), T::struct_tag())?
+        .map(|bytes| {
+            T::deserialize_into_config(&bytes)
+                .map_err(|e| ResourceProviderError::InvariantViolation(format!("{e:#}")))
+        })
+        .transpose()
+}
+
+/// Reads the resource `T` at `address` through `interp`.
+pub(crate) fn read_resource<T: MoveStructType + DeserializeOwned>(
+    interp: &mut InterpreterContext<'_>,
+    guard: &ExecutionGuard<'_>,
+    address: AccountAddress,
+) -> Result<Option<T>, ResourceProviderError> {
+    read_resource_bytes(interp, guard, address, T::struct_tag())?
+        .map(|bytes| {
+            bcs::from_bytes(&bytes)
+                .map_err(|e| ResourceProviderError::InvariantViolation(e.to_string()))
+        })
+        .transpose()
 }
 
 /// A resource group's members and their stored bytes.
