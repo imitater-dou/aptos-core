@@ -29,9 +29,9 @@ use mono_move_core::{
     storage::resource_provider::InMemoryStorageKey,
     types::{view_name, view_type_list, InternedType, InternedTypeList},
     DescriptorId, DescriptorProvider, ExecutionErrorKind, FormatOptions, Function, GasMeter,
-    LayoutKind, LayoutProvider,
-    ObjectDescriptorInner, ResourceProvider, VMResult, ENUM_DATA_OFFSET, FRAME_METADATA_SIZE,
-    OBJECT_HEADER_SIZE, POINTER_VEC_DESCRIPTOR_ID, TRIVIAL_DESCRIPTOR_ID,
+    LayoutKind, LayoutProvider, ObjectDescriptorInner, ResourceProvider, VMResult,
+    ENUM_DATA_OFFSET, FRAME_METADATA_SIZE, OBJECT_HEADER_SIZE, POINTER_VEC_DESCRIPTOR_ID,
+    TRIVIAL_DESCRIPTOR_ID,
 };
 use mono_move_global_context::ExecutionGuard;
 use move_core_types::account_address::AccountAddress;
@@ -840,12 +840,12 @@ impl NativeContext for ProductionNativeContext<'_> {
     ) -> VMResult<String> {
         let mut out = String::new();
         // SAFETY: forwarded from this method's contract.
-        unsafe { crate::value_display::display(self.layouts, base, ty, options, &mut out)? };
+        unsafe { crate::value_display::display(self.guard, base, ty, options, &mut out)? };
         Ok(out)
     }
 
     fn field_offset(&self, ty: InternedType, i: usize) -> VMResult<Option<u32>> {
-        let layout = self.layouts.layout_by_ty(ty).ok_or({
+        let layout = self.guard.layout_by_ty(ty).ok_or({
             RuntimeError::InvariantViolation(RuntimeInvariantViolation::ValueLayoutNotFound)
         })?;
         let LayoutKind::Struct { fields, .. } = &layout.kind else {
