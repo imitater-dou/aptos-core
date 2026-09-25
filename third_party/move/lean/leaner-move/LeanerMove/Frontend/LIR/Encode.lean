@@ -3,6 +3,8 @@
 
 import LeanerMove.Profile
 import LeanerMove.Frontend.Effects
+import LeanerMove.Frontend.Frames
+import LeanerLang.AddressAlias
 import LeanerMove.Frontend.LIR.Codec
 
 /-!
@@ -40,6 +42,8 @@ structure BuildState where
   /-- Hidden temporaries the encoder introduced, named `$t<n>` like the
   LeanerLang lowering's, so the two lowerings of one element access agree. -/
   temporaryLocals : Nat := 0
+  /-- The package's functions that may write global memory. -/
+  globalWriters : List QualifiedName := []
 
 abbrev BuildM := StateT BuildState (Except String)
 
@@ -69,9 +73,19 @@ private def addGeneratedLocation (parent : LeanerIR.LocId) : BuildM LeanerIR.Loc
     parent := some parent } }
   return id
 
+/-- A module's address in its canonical spelling. -/
+private def canonicalModuleAddress (module : ModuleRef) : String :=
+  (LeanerLang.addressValue? module.address).map LeanerLang.canonicalAddress |>.getD module.address
+
+/-- The namespace of a module: one per address and name, however a reference
+spells the address; the first reference naming an alias gives it. -/
 private def addModuleRef (module : ModuleRef) : BuildM LeanerIR.NamespaceId := do
   let state ← get
-  if let some index := state.sourceNamespaces.findIdx? (· == module) then
+  let module := { module with address := canonicalModuleAddress module }
+  if let some index := state.sourceNamespaces.findIdx? fun candidate =>
+      candidate.address == module.address && candidate.name == module.name then
+    if state.sourceNamespaces[index]!.addressAlias.isNone && module.addressAlias.isSome then
+      set { state with sourceNamespaces := state.sourceNamespaces.set! index module }
     return ⟨index⟩
   let id : LeanerIR.NamespaceId := ⟨state.sourceNamespaces.size⟩
   set { state with sourceNamespaces := state.sourceNamespaces.push module }
@@ -325,28 +339,39 @@ stackless bytecode they are instructions, and the logical bytecode model
 likewise makes them operations rather than callable functions. Lowering them
 to the LIR operations that already mean the same thing is what makes vector
 code executable at all — left as calls they resolve to absent bodies. The
-remaining natives are deliberately not listed, so they stay ordinary calls and
-surface as absent bodies rather than as silently wrong semantics: `pop_back`,
-`swap`, `move_range` and `destroy_empty` have no LIR counterpart yet, and
-`borrow`/`borrow_mut` need the place normalization that turns a value borrow
-into a place borrow. Element access is already available through Move's index
-notation. -/
+remaining native, `move_range`, has no LIR counterpart yet and is deliberately
+not listed, so it stays an ordinary call and surfaces as an absent body rather
+than as silently wrong semantics. -/
 private def vectorNative? (name : Xast.QualifiedName) : Option String :=
   let inVectorModule :=
-    name.module.name == "vector" &&
-      (name.module.address == "0x1" || name.module.addressAlias == some "std")
+    name.module.name == "vector" && canonicalModuleAddress name.module == "0x1"
   if inVectorModule &&
-      ["empty", "length", "push_back", "swap", "borrow", "borrow_mut"].contains name.name then
+      ["empty", "length", "push_back", "pop_back", "swap", "destroy_empty", "borrow",
+        "borrow_mut"].contains name.name then
     some name.name
   else
     none
+
+/-- Names the specification version of a value-level `std::vector` native,
+which means the same LIR operation as the native. -/
+private def vectorSpecNative? (name : Xast.QualifiedName) : Option String :=
+  if name.module.name == "vector" && canonicalModuleAddress name.module == "0x1" &&
+      (name.name == "$empty" || name.name == "$length") then
+    some (name.name.drop 1).toString
+  else
+    none
+
+/-- The width of an unsigned fixed-width integer type. -/
+private def unsignedBits? : Option Xast.Ty → Option Nat
+  | some .u8 => some 8 | some .u16 => some 16 | some .u32 => some 32
+  | some .u64 => some 64 | some .u128 => some 128 | some .u256 => some 256
+  | _ => none
 
 /-- `std::signer::address_of` is LIR's signer-address primitive, which takes
 the signer by reference as the native does. A specification applies it
 through its specification version, `$address_of`, with the same meaning. -/
 private def isSignerAddressOf (name : Xast.QualifiedName) : Bool :=
-  name.module.name == "signer" &&
-    (name.module.address == "0x1" || name.module.addressAlias == some "std") &&
+  name.module.name == "signer" && canonicalModuleAddress name.module == "0x1" &&
     (name.name == "address_of" || name.name == "$address_of")
 
 private def lirOperation : Xast.Operation → BuildM LeanerIR.Operation
@@ -488,23 +513,91 @@ mutual
                           #[← vectorOperand] (surfaceSyntax surface)
                     | "swap" => do
                         -- Exchanging two elements is the value-level swap
-                        -- stored back into the path it came from, the same
-                        -- shape as `push_back`.
-                        let some (.mk _ _ (.call (.borrow _) _
-                            [target@(.mk targetTy _ _)] _)) := sourceArguments.head?
-                          | pure none
-                        let some place ← placeOf? target
-                          | pure none
+                        -- stored back where it came from, the same shape as
+                        -- `push_back`.
                         let some left := arguments[1]?
                           | throw "`vector::swap` has no first index operand"
                         let some right := arguments[2]?
                           | throw "`vector::swap` has no second index operand"
+                        if let some (.mk _ _ (.call (.borrow _) _
+                            [target@(.mk targetTy _ _)] _)) := sourceArguments.head? then
+                          if let some place ← placeOf? target then
+                            let swapLoc ← addGeneratedLocation loc
+                            let vectorType ← addType swapLoc targetTy
+                            let current ← addExpr target
+                            let swapped ← addExprNode swapLoc vectorType <|
+                              .operation (.primitive .swapVector) #[] #[current, left, right]
+                            return some (.assign place swapped)
+                        let some reference := arguments[0]?
+                          | throw "`vector::swap` has no vector operand"
+                        let some (.mk (.reference _ referent) _ _) := sourceArguments.head?
+                          | throw "`vector::swap` does not take a reference"
                         let swapLoc ← addGeneratedLocation loc
-                        let vectorType ← addType swapLoc targetTy
-                        let current ← addExpr target
+                        let vectorType ← addType swapLoc referent
+                        let current ← addExprNode swapLoc vectorType <|
+                          .operation (.reference .dereference) #[] #[reference]
                         let swapped ← addExprNode swapLoc vectorType <|
                           .operation (.primitive .swapVector) #[] #[current, left, right]
-                        return some (.assign place swapped)
+                        pure <| some <| .operation (.reference .mutate) #[]
+                          #[reference, swapped] (surfaceSyntax surface)
+                    | "pop_back" => do
+                        -- Removing the last element is the value-level
+                        -- removal at the last index, the rest written back
+                        -- through the reference; an empty vector aborts with
+                        -- the VM's vector error 2.
+                        let some reference := arguments[0]?
+                          | throw "`vector::pop_back` has no vector operand"
+                        let some (.mk referenceTy@(.reference _ referent) _ _) :=
+                            sourceArguments.head?
+                          | throw "`vector::pop_back` does not take a reference"
+                        let popLoc ← addGeneratedLocation loc
+                        let referenceType ← addType popLoc referenceTy
+                        let vectorType ← addType popLoc referent
+                        let indexType ← addType popLoc .u64
+                        let boolType ← addType popLoc .bool
+                        let pairType ← addType popLoc (.tuple [ty, referent])
+                        let unitType ← unitTypeId
+                        let slot ← temporaryLocal referenceType popLoc
+                        let current : BuildM LeanerIR.ExprId := do
+                          let read ← addExprNode popLoc referenceType (.localVar slot)
+                          addExprNode popLoc vectorType <|
+                            .operation (.reference .dereference) #[] #[read]
+                        let length : BuildM LeanerIR.ExprId := do
+                          addExprNode popLoc indexType <|
+                            .operation (.primitive .length) #[] #[← current]
+                        let zero ← addExprNode popLoc indexType (.value (.integer 0))
+                        let empty ← addExprNode popLoc boolType <|
+                          .operation (.primitive .equal) #[] #[← length, zero]
+                        let code ← addExprNode popLoc indexType (.value (.integer 2))
+                        let failure ← addExprNode popLoc unitType <|
+                          .throw_ (.profile { profile := .move, tag := "runtime.vector_error" })
+                            #[code]
+                        let check ← addExprNode popLoc unitType (.ifElse empty failure none)
+                        let one ← addExprNode popLoc indexType (.value (.integer 1))
+                        let last ← addExprNode popLoc indexType <|
+                          .operation (.primitive (.checkedSubtract .abort)) #[] #[← length, one]
+                        let removal ← addExprNode popLoc pairType <|
+                          .operation (.primitive .removeVector) #[] #[← current, last]
+                        let removed ← temporaryLocal typeId popLoc
+                        let rest ← temporaryLocal vectorType popLoc
+                        let removedPattern ← addPatternNode popLoc typeId (.variable removed)
+                        let restPattern ← addPatternNode popLoc vectorType (.variable rest)
+                        let pairPattern ← addPatternNode popLoc pairType
+                          (.tuple #[removedPattern, restPattern])
+                        let restRead ← addExprNode popLoc vectorType (.localVar rest)
+                        let writeReference ← addExprNode popLoc referenceType (.localVar slot)
+                        let write ← addExprNode popLoc unitType <|
+                          .operation (.reference .mutate) #[] #[writeReference, restRead]
+                        let result ← addExprNode popLoc typeId (.localVar removed)
+                        let written ← addExprNode popLoc typeId (.block #[write] (some result))
+                        let popped ← addExprNode popLoc typeId
+                          (.letDecl pairPattern (some removal) written)
+                        let checked ← addExprNode popLoc typeId (.block #[check] (some popped))
+                        let slotPattern ← addPatternNode popLoc referenceType (.variable slot)
+                        pure <| some <| .letDecl slotPattern (some reference) checked
+                    | "destroy_empty" =>
+                        pure <| some <| .operation (.primitive .destroyEmptyVector) #[]
+                          arguments (surfaceSyntax surface)
                     | "push_back" => do
                         -- Growing a vector in place is the value-level push
                         -- stored back where it came from. When the native's
@@ -590,9 +683,25 @@ mutual
                   if isSignerAddressOf name then
                     pure <| .operation (.primitive .signerAddress) #[] arguments
                       (surfaceSyntax surface)
-                  else
-                    pure <| .operation (← lirOperation operation) instantiations arguments
-                      (surfaceSyntax surface)
+                  else match ← vectorNativeNode (vectorSpecNative? name) with
+                    | some node => pure node
+                    | none =>
+                        pure <| .operation (← lirOperation operation) instantiations arguments
+                          (surfaceSyntax surface)
+              | .shl =>
+                  -- A specification's shift of a fixed-width value wraps at
+                  -- its width, as the Move Prover reads it.
+                  match (← get).logical, unsignedBits? (sourceArguments.head?.map (·.ty)) with
+                  | true, some bits => do
+                      -- The unbounded shift, reduced modulo the width.
+                      let numType ← addType loc .num
+                      let shifted ← addExprNode loc numType <|
+                        .operation (.primitive .shiftLeft) #[] arguments (surfaceSyntax surface)
+                      let modulus ← addExprNode loc numType (.value (.integer (2 ^ bits)))
+                      pure <| .operation (.primitive .modulo) #[] #[shifted, modulus]
+                  | _, _ =>
+                      pure <| .operation (← lirOperation operation) instantiations arguments
+                        (surfaceSyntax surface)
               | .and | .or =>
                   -- Move's `&&` and `||` short-circuit. In executable code
                   -- they are the conditional the LeanerLang lowering also
@@ -1126,7 +1235,9 @@ private def buildNamespace (unitIndex : Nat) (module : Xast.Module) :
       let expressionsBefore := (← get).expressions.size
       let body ← function.body.mapM addExpr
       let parameters ← withMutablyBorrowedLocals expressionsBefore parameters
-      let functionContract ← addContract function.spec functionLoc
+      let functionContract := Frames.explicit (← addContract function.spec functionLoc)
+        ((← get).globalWriters.contains (ownName module function.name))
+        (pragmaTrue function.pragmas "opaque")
       let locals := (← get).locals
       let attributes ← function.attributes.toArray
         |>.filter (!isResolvedBuildSelectionAttribute ·) |>.mapM addAttribute
@@ -1147,7 +1258,10 @@ private def buildNamespace (unitIndex : Nat) (module : Xast.Module) :
         alignment
         locals
         contract := functionContract
-        pragmas := function.pragmas.toArray.map toPragma
+        -- A function's pragmas resolve its contract's, the explicit frame's
+        -- included.
+        pragmas := function.pragmas.toArray.map toPragma ++
+          (if LeanerLang.hasLooseFrame functionContract then #[Frames.loosePragma] else #[])
         profileData
         attributes }
     let mut specFunctions : Array LeanerIR.SpecFunctionDecl := #[]
@@ -1261,7 +1375,9 @@ private def buildNamespace (unitIndex : Nat) (module : Xast.Module) :
 boundary. -/
 def package (package : Package) : Except String LeanerIR.Import.RawUnit := do
   let ownedNamespaces := package.modules.toArray.map (·.ref)
-  let initial : BuildState := { sourceNamespaces := ownedNamespaces }
+  let initial : BuildState := {
+    sourceNamespaces := ownedNamespaces
+    globalWriters := Frames.globalWriters package }
   -- Dependency interfaces are built after the owned namespaces, so their
   -- namespace identities follow the ones this unit declares.
   let build : BuildM (Array LeanerIR.Import.RawNamespace ×
@@ -1272,10 +1388,7 @@ def package (package : Package) : Except String LeanerIR.Import.RawUnit := do
     return (namespaces, dependencies)
   let ((namespaces, dependencies), finalState) ← build.run initial
   let namespaceRefs := finalState.sourceNamespaces.map fun ref =>
-    let segments := match ref.addressAlias with
-      | some alias => #[ref.address, alias, ref.name]
-      | none => #[ref.address, ref.name]
-    { segments }
+    ({ segments := #[ref.address, ref.name], alias := ref.addressAlias } : LeanerIR.NamespaceRef)
   let evidence : Array LeanerIR.Import.ImportEvidence := #[{
     producer := "move exchange --format ast"
     description := "typed XAST v3 imported into neutral LIR" }]

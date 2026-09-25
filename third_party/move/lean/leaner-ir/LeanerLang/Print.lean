@@ -4,7 +4,9 @@
 import Lean.Data.Json
 import LeanerLang.Builtins
 import LeanerLang.Frame
+import LeanerLang.Modifiers
 import LeanerLang.Profile
+import LeanerLang.Reserved
 import LeanerLang.Print.Layout
 
 /-!
@@ -95,22 +97,7 @@ private def fitsIndentedLine (value : String) : Bool :=
   -- Top-level declarations are indented once by the namespace command.
   value.length + 2 <= 80
 
-private def sourceReservedIdentifier (value : String) : Bool :=
-  value ∈ [
-    "move", "rust", "Unit", "Never", "Bool", "Char", "string", "Bytes",
-    "Address", "Signer", "UInt", "SInt", "UPtr", "IPtr", "Nat", "Int",
-    "u8", "u16", "u32", "u64", "u128", "u256",
-    "i8", "i16", "i32", "i64", "i128", "i256", "usize", "isize",
-    "Range", "Vector", "Fn", "const", "type", "lifetime", "evidence", "mut",
-    "private", "public", "package", "friend", "entry", "native", "opaque", "deprecated", "view",
-    "pragma", "let_pre", "let_post", "requires", "ensures", "aborts_if", "assert", "assume",
-    "invariant", "spec", "fun", "module", "namespace", "using", "where", "struct",
-    "enum", "has", "Copy", "Drop", "Store", "Key", "true", "false",
-    "abort", "panic", "do", "let", "loop", "while", "for", "break", "continue", "forall",
-    "exists", "in", "immutable", "if", "then", "else", "return", "old",
-    "copy", "drop", "discriminant", "invoke", "function",
-    "as", "match", "with", "use"
-  ]
+
 
 private def sourceIdentifier (value : String) : String :=
   let value := if value.startsWith "$" then
@@ -120,7 +107,7 @@ private def sourceIdentifier (value : String) : String :=
     else value
   if !value.isEmpty && value.all Char.isDigit then value
   else (Lean.Name.mkSimple value).toStringWithToken
-    (isToken := sourceReservedIdentifier)
+    (isToken := isReservedWord)
 
 /-- Compiler-v2 records the authored receiver head (for example
 `self.list.contains`) in the call name for some Move 2 calls. The semantic
@@ -153,11 +140,17 @@ private def nameAt (unit : ValidatedUnit) (id : NameId) : Except String String :
     | throw s!"LeanerLang source references missing name {id.index}"
   pure (sourceIdentifier name.name)
 
+/-- A namespace path as its source spells it: a Move module led by its
+address alias when it has one. -/
 private def namespacePath (unit : ValidatedUnit) (id : NamespaceId) : Except String String := do
   let some path := unit.tables.namespaces[id.index]?
     | throw s!"LeanerLang source references missing namespace {id.index}"
-  if path.segments.isEmpty then throw "LeanerLang cannot print an empty namespace path"
-  pure ("::".intercalate (path.segments.map sourceIdentifier).toList)
+  let some first := path.segments[0]?
+    | throw "LeanerLang cannot print an empty namespace path"
+  let leading := match path.alias with
+    | some alias => sourceIdentifier alias
+    | none => if first.startsWith "0x" then first else sourceIdentifier first
+  pure ("::".intercalate (leading :: (path.segments.drop 1).toList.map sourceIdentifier))
 
 private def pushReferencedName (names : Array NameId) (name : NameId) : Array NameId :=
   if names.contains name then names else names.push name
@@ -2104,9 +2097,7 @@ private def standardVectorFunction? (context : Context) (reference : QualifiedRe
   | some qualified, some namespaceRef =>
       qualified.namespaceId == reference.namespaceId &&
         executableReferenceName qualified.name == functionName &&
-        namespaceRef.segments.size >= 2 &&
-        namespaceRef.segments[namespaceRef.segments.size - 2]? == some "std" &&
-        namespaceRef.segments.back? == some "vector"
+        isMoveStdModule context.ns.profile namespaceRef "vector"
   | _, _ => false
 
 private def standardReceiverFunction? (context : Context)
@@ -4005,82 +3996,7 @@ private def nominalText (unit : ValidatedUnit) (ns : ValidatedNamespace)
   | none => pure declarationText
   | some contract => pure s!"{declarationText}\n\n{contract}"
 
-private structure PrintedModifiers where
-  visibility : LeanerLang.Visibility := .private_
-  isDeprecated : Bool := false
-  isView : Bool := false
-  isEntry : Bool := false
-  isNative : Bool := false
-  isOpaque : Bool := false
-
-private def visibilityOf (value : String) : Except String LeanerLang.Visibility :=
-  match value with
-  | "private" | "visibility.private" => pure .private_
-  | "public" | "visibility.public" => pure .public_
-  | "package" | "visibility.package" => pure .package
-  | "friend" | "visibility.friend" => pure .friend
-  | _ => throw s!"unknown function visibility `{value}`"
-
-private def mergeVisibility (current : Option LeanerLang.Visibility)
-    (next : LeanerLang.Visibility) : Except String (Option LeanerLang.Visibility) :=
-  match current with
-  | none => pure (some next)
-  | some previous =>
-      if previous == next then pure current
-      else throw "function carries conflicting visibility metadata"
-
-private def functionModifiers
-    (declaration : LeanerIR.FunctionDecl FunctionBody) : Except String PrintedModifiers := do
-  let mut result : PrintedModifiers := {}
-  let mut visibility : Option LeanerLang.Visibility := none
-  for value in declaration.profileData do
-    unless value.profile == declaration.profile do
-      throw s!"function profile metadata `{value.tag}` belongs to a different profile"
-    if value.tag.startsWith "visibility." then
-      visibility ← mergeVisibility visibility (← visibilityOf value.tag)
-    else match value.tag with
-      | "function.regular" => pure ()
-      | "function.entry" => result := { result with isEntry := true }
-      | "function.native" => result := { result with isNative := true }
-      -- Move classifies both tags as frontend-only provenance. Canonical
-      -- LeanerLang retains the ordinary function and prefix-call semantics.
-      | "function.inlineRetained" | "function.receiver" => pure ()
-      | tag => throw s!"function profile property `{tag}` has no canonical LeanerLang spelling"
-  for attr in declaration.attributes do
-    match attr with
-    | .assign "visibility" (.qualifiedName value) _ =>
-        visibility ← mergeVisibility visibility (← visibilityOf value)
-    | .call "entry" arguments _ =>
-        unless arguments.isEmpty do throw "the `entry` modifier attribute has arguments"
-        result := { result with isEntry := true }
-    | .call "native" arguments _ =>
-        unless arguments.isEmpty do throw "the `native` modifier attribute has arguments"
-        result := { result with isNative := true }
-    | .call "opaque" arguments _ =>
-        unless arguments.isEmpty do throw "the `opaque` modifier attribute has arguments"
-        result := { result with isOpaque := true }
-    | .call "deprecated" arguments _ =>
-        unless arguments.isEmpty do throw "the `deprecated` modifier attribute has arguments"
-        result := { result with isDeprecated := true }
-    | .call "view" arguments _ =>
-        unless arguments.isEmpty do throw "the `view` modifier attribute has arguments"
-        result := { result with isView := true }
-    | .call "bytecode_instruction" arguments _ =>
-        unless arguments.isEmpty do
-          throw "the `bytecode_instruction` provenance attribute has arguments"
-    | _ => pure () -- Ordinary metadata is printed above the declaration.
-  result := { result with visibility := visibility.getD .private_ }
-  if result.isNative && result.isOpaque then
-    throw "a function cannot be both native and opaque"
-  match declaration.body with
-  | .structured _ =>
-      if result.isNative || result.isOpaque then
-        throw "a native or opaque function unexpectedly has an executable body"
-      pure result
-  | .absent =>
-      pure <| if result.isNative then result else { result with isOpaque := true }
-
-private def modifiersText (modifiers : PrintedModifiers) : String :=
+private def modifiersText (modifiers : LeanerLang.FunctionModifiers) : String :=
   let values := #[]
   let values := match modifiers.visibility with
     | .private_ => values
@@ -4154,16 +4070,16 @@ private def constantText (unit : ValidatedUnit) (ns : ValidatedNamespace)
 including standard aliases that the module never mentions. Names are already
 resolved in checked LIR, so these frontend-only entries are not part of the
 canonical program projection. A module's own address alias is likewise already
-spelled by the middle segment of its structural `address::alias::module` path;
-accept it only when the redundant metadata agrees with that path. Metadata
-that can affect a declaration remains an explicit capability error. -/
+the alias of its namespace reference; accept it only when the redundant
+metadata agrees with that reference. Metadata that can affect a declaration
+remains an explicit capability error. -/
 private def isResolvedMoveEnvironment (unit : ValidatedUnit) (ns : ValidatedNamespace) :
     ProfileValue → Bool
   | { profile := .move, tag := "metadata.namedAddress", .. } => true
   | { profile := .move, tag := "metadata.addressAlias", payload } =>
-      match unit.tables.namespaces[ns.identity.index]? with
-      | some { segments := #[_, alias, _] } => !alias.isEmpty && payload == alias
-      | _ => false
+      match unit.tables.namespaces[ns.identity.index]?.bind (·.alias) with
+      | some alias => !alias.isEmpty && payload == alias
+      | none => false
   | _ => false
 
 private def stringArrayPayload (payload : String) : Except String (Array String) := do
@@ -4287,7 +4203,7 @@ private def functionText (unit : ValidatedUnit) (ns : ValidatedNamespace)
     throw "function profile differs from its namespace profile"
   unless declaration.signature.predicates.isEmpty do
     throw "function predicates are outside the current LeanerLang printer"
-  let modifiers ← functionModifiers declaration
+  let modifiers ← declaredModifiers declaration
   let name ← nameAt unit declaration.name
   let binders := " ".intercalate
     (← declaration.signature.generics.mapM (binderText unit)).toList
@@ -4548,11 +4464,27 @@ private def renderSemanticNamespace (unit : ValidatedUnit)
     s!"leaner namespace {path} using {profileName} where\n" ++
     indent ("\n\n".intercalate declarations.toList) ++ "\n"
 
+/-- The Move address aliases a unit spells its namespaces with. -/
+def unitAliases (unit : ValidatedUnit) : Array (String × String) :=
+  unit.tables.namespaces.foldl (init := #[]) fun found ref =>
+    match ref.alias, ref.segments[0]? with
+    | some alias, some address =>
+        if found.any (·.1 == alias) then found else found.push (alias, address)
+    | _, _ => found
+
+/-- The aliases a unit spells that an environment does not declare as they
+stand: a rendering declares them itself. -/
+private def undeclaredAliases (environment : Lean.Environment) (unit : ValidatedUnit) :
+    Array (String × String) :=
+  (unitAliases unit).filter fun (alias, address) =>
+    (addressAliases environment)[alias]? != some address
+
 private def renderWithLeadingCommentsAt (environment : Lean.Environment)
     (unit : ValidatedUnit) (identity : NamespaceId) (width : Nat)
     (leadingComments : Array String) : Except Error String := do
   let source ← renderSemanticNamespace unit identity
   Layout.formatSource environment source width "<generated>" leadingComments
+      (undeclaredAliases environment unit)
     |>.mapError fun message =>
     { message := s!"{message}\n--- semantic source ---\n{source}" }
 
@@ -4569,6 +4501,25 @@ other owned namespaces as authoritative declaration context for imports. -/
 def renderNamespace (environment : Lean.Environment) (unit : ValidatedUnit)
     (identity : NamespaceId) (width : Nat := 80) : Except Error String :=
   renderWithLeadingCommentsAt environment unit identity width #[]
+
+/-- The other namespaces a namespace's rendering names. -/
+def referencedNamespaces (unit : ValidatedUnit) (ns : ValidatedNamespace) :
+    Array NamespaceId :=
+  (referencedNames unit ns).foldl (init := #[]) fun found id =>
+    match unit.tables.names[id.index]? with
+    | some name =>
+        if name.namespaceId == ns.identity || found.contains name.namespaceId then found
+        else found.push name.namespaceId
+    | none => found
+
+/-- Render several owned namespaces of a unit as one self-contained source,
+in the given order: a namespace must follow the namespaces it uses. -/
+def renderNamespaces (environment : Lean.Environment) (unit : ValidatedUnit)
+    (identities : Array NamespaceId) (width : Nat := 80) : Except Error String := do
+  let sources ← identities.mapM (renderSemanticNamespace unit)
+  Layout.formatSources environment sources width "<generated>"
+      (undeclaredAliases environment unit) |>.mapError fun message =>
+    { message := s!"{message}\n--- semantic sources ---\n{"\n".intercalate sources.toList}" }
 
 private def compileErrorText : CompileError → String
   | .frontend diagnostics =>
@@ -4592,14 +4543,23 @@ private def compileErrorTextAt (command : String) : CompileError → String
         s!"{diagnostic.render}{location}"
   | error => compileErrorText error
 
-private def parseSourceUnit (environment : Lean.Environment) (source sourceName : String) :
-    Except Error CompilationUnit := do
+/-- Parse one namespace's source for compilation: its Move addresses made
+canonical against the aliases the source declares, then `aliases` (a unit's
+own), then the environment's. -/
+private def parseSourceUnit (environment : Lean.Environment) (source sourceName : String)
+    (aliases : Array (String × String) := #[]) : Except Error CompilationUnit := do
   let (command, comments, namespaceDoc) ← Layout.namespaceStart source
     |>.mapError fun message => { message }
   let parsedSyntax ← Lean.Parser.runParserCategory environment `command command sourceName
     |>.mapError fun message => { message }
-  compilationUnitOfSyntax parsedSyntax sourceName comments namespaceDoc
+  let known := Layout.preludeAliases source ++ aliases
+  let lookup (alias : String) : Option String :=
+    (known.find? (·.1 == alias)).map (·.2) <|> (addressAliases environment)[alias]?
+  let (parsedSyntax, spelled) ← canonicalMoveCommandWith lookup parsedSyntax
     |>.mapError fun (_, message) => { message }
+  let unit ← compilationUnitOfSyntax parsedSyntax sourceName comments namespaceDoc
+    |>.mapError fun (_, message) => { message }
+  pure { unit with namespaces := unit.namespaces.map fun ns => { ns with aliases := spelled } }
 
 /-- Declaration-only source view used while checking a namespace against the
 other namespaces in its compilation unit. Bodies and contracts are deliberately
@@ -4725,6 +4685,32 @@ private def dependencyInterfaceText (unit : ValidatedUnit)
     s!"leaner namespace {path} using {profileName} where\n" ++
     indent ("\n\n".intercalate declarations.toList) ++ "\n"
 
+/-- An owned namespace of a validated unit as the declarations another
+namespace is lowered against: its signatures, without bodies or contracts. -/
+def interfaceNamespace (environment : Lean.Environment) (unit : ValidatedUnit)
+    (identity : NamespaceId) (aliases : Array (String × String) := unitAliases unit) :
+    Except Error Namespace := do
+  let some dependency := unit.namespaces.find? (·.identity == identity)
+    | throw { message := s!"missing dependency namespace {identity.index} in compilation context" }
+  let some dependencyPath := unit.tables.namespaces[identity.index]?.map (·.segments)
+    | throw { message := s!"missing dependency namespace {identity.index} in compilation context" }
+  let semantic ← renderSemanticNamespace unit identity
+  let mut companions := #[]
+  for declaration in dependency.specFunctions do
+    if let some name := moveCompanionName? unit dependency declaration then
+      companions := companions.push
+        (← moveCompanionInterfaceText unit dependency declaration name
+          |>.mapError fun message => { message })
+  let semantic := if companions.isEmpty then semantic else
+    semantic.trimAsciiEnd.toString ++ "\n\n" ++
+      indent ("\n\n".intercalate companions.toList) ++ "\n"
+  let parsed ← parseSourceUnit environment semantic s!"<dependency {identity.index}>" aliases
+  let [parsedNs] := parsed.namespaces.toList
+    | throw { message := s!"dependency {identity.index} did not render as one namespace" }
+  unless parsedNs.path == dependencyPath do
+    throw { message := s!"dependency {identity.index} rendered at another path" }
+  pure (dependencyInterfaceNamespace parsedNs)
+
 /-- Canonically recompile one source namespace against all declaration
 signatures in an existing validated compilation unit, returning the freshly
 validated unit. This is the round-trip entry behind
@@ -4735,51 +4721,23 @@ def reimportSourceInContext (environment : Lean.Environment) (source : String)
     (context : ValidatedUnit) (identity : NamespaceId)
     (sourceName : String := "<source>") : Except Error ValidatedUnit := do
   let (command, _, _) ← Layout.namespaceStart source |>.mapError fun message => { message }
-  let sourceUnit ← parseSourceUnit environment source sourceName
+  let aliases := unitAliases context
+  let sourceUnit ← parseSourceUnit environment source sourceName aliases
   let [sourceNs] := sourceUnit.namespaces.toList
     | throw { message := "formatted LeanerLang source must own exactly one namespace" }
-  let some contextNs := context.namespaces.find? (·.identity == identity)
-    | throw { message := s!"missing owned namespace {identity.index} in compilation context" }
   let some storedPath := context.tables.namespaces[identity.index]?.map (·.segments)
     | throw { message := s!"missing source namespace {identity.index} in compilation context" }
-  -- Move's exchange AST retains a named-address alias as a middle segment
-  -- (`0x1::std::vector`). A module declaration has the canonical Move shape
-  -- `address::module`, while qualified references may still use the alias.
-  let expectedPath := if contextNs.profile == some .move && storedPath.size > 1 then
-    #[storedPath[0]!, storedPath.back!]
-  else storedPath
-  unless sourceNs.path == expectedPath do
-    throw { message := s!"source namespace `{"::".intercalate sourceNs.path.toList}` does not match compilation-context namespace `{"::".intercalate expectedPath.toList}`" }
+  unless sourceNs.path == storedPath do
+    throw { message := s!"source namespace `{"::".intercalate sourceNs.path.toList}` does not match compilation-context namespace `{"::".intercalate storedPath.toList}`" }
   let mut dependencies := #[]
   for dependency in context.namespaces do
     if dependency.identity != identity then
-      let some dependencyPath := context.tables.namespaces[dependency.identity.index]?.map
-          (·.segments)
-        | throw { message := s!"missing dependency namespace {dependency.identity.index} in compilation context" }
-      let semantic ← renderSemanticNamespace context dependency.identity
-      let mut companions := #[]
-      for declaration in dependency.specFunctions do
-        if let some name := moveCompanionName? context dependency declaration then
-          companions := companions.push
-            (← moveCompanionInterfaceText context dependency declaration name
-              |>.mapError fun message => { message })
-      let semantic := if companions.isEmpty then semantic else
-        semantic.trimAsciiEnd.toString ++ "\n\n" ++
-          indent ("\n\n".intercalate companions.toList) ++ "\n"
-      let parsed ← parseSourceUnit environment semantic
-        s!"<dependency {dependency.identity.index}>"
-      let [parsedNs] := parsed.namespaces.toList
-        | throw { message := s!"dependency {dependency.identity.index} did not render as one namespace" }
-      -- A Move module header intentionally drops compiler-owned package aliases
-      -- (`0x1::std::vector` becomes `0x1::vector`). Qualified `use` paths retain
-      -- those aliases. Restore the authoritative context path on this private
-      -- declaration interface so imported calls resolve to their signatures.
-      dependencies := dependencies.push {
-        dependencyInterfaceNamespace parsedNs with path := dependencyPath }
+      dependencies := dependencies.push
+        (← interfaceNamespace environment context dependency.identity aliases)
   for interface in context.dependencies do
     let semantic ← dependencyInterfaceText context interface
     let parsed ← parseSourceUnit environment semantic
-      s!"<dependency interface {interface.namespaceId.index}>"
+      s!"<dependency interface {interface.namespaceId.index}>" aliases
     let [parsedNs] := parsed.namespaces.toList
       | throw { message :=
           s!"dependency interface {interface.namespaceId.index} did not render as one namespace" }
@@ -4787,15 +4745,11 @@ def reimportSourceInContext (environment : Lean.Environment) (source : String)
         (·.segments)
       | throw { message :=
           s!"missing dependency namespace {interface.namespaceId.index} in compilation context" }
-    dependencies := dependencies.push {
-      dependencyInterfaceNamespace parsedNs with path := dependencyPath }
-  -- The Move module header drops the package alias its stored path keeps
-  -- (`0x1::std::vector` is written `0x1::vector`). Compiling under the
-  -- authoritative path leaves one namespace per module, so a reference to an
-  -- imported name reads the same here as it does in the unit being printed.
-  let combined : CompilationUnit := {
-    sourceName
-    namespaces := #[{ sourceNs with path := storedPath }] ++ dependencies }
+    unless parsedNs.path == dependencyPath do
+      throw { message :=
+        s!"dependency interface {interface.namespaceId.index} rendered at another path" }
+    dependencies := dependencies.push (dependencyInterfaceNamespace parsedNs)
+  let combined : CompilationUnit := { sourceName, namespaces := #[sourceNs] ++ dependencies }
   compile combined |>.mapError fun error => {
     message := compileErrorTextAt command error }
 
@@ -4809,19 +4763,12 @@ def reimportUnit (environment : Lean.Environment) (unit : ValidatedUnit)
   for original in unit.namespaces do
     let source ← renderNamespace environment unit original.identity width
     let parsed ← parseSourceUnit environment source
-      s!"<reimport {original.identity.index}>"
+      s!"<reimport {original.identity.index}>" (unitAliases unit)
     let [parsedNs] := parsed.namespaces.toList
       | throw
           { message :=
             s!"reimported namespace {original.identity.index} did not render as one namespace" }
-    -- Restore the authoritative table path on the parsed namespace so
-    -- qualified references resolve across the combined unit regardless of
-    -- package-alias forms the renderer drops from module headers.
-    let some storedPath := unit.tables.namespaces[original.identity.index]?.map (·.segments)
-      | throw
-          { message :=
-            s!"missing namespace {original.identity.index} in compilation tables" }
-    namespaces := namespaces.push { parsedNs with path := storedPath }
+    namespaces := namespaces.push parsedNs
   compile { sourceName := "<reimport>", namespaces := namespaces } |>.mapError
     fun error =>
       { message := s!"round-trip recompilation failed: {compileErrorText error}" : Error }
@@ -4841,7 +4788,8 @@ carry Lean's elaboration environment. -/
 unsafe def loadEnvironment : IO Lean.Environment := do
   Lean.enableInitializersExecution
   Lean.initSearchPath (← Lean.findSysroot)
-  Lean.importModules #[{ module := `LeanerLang.Elab }] {} (loadExts := true)
+  Lean.importModules #[{ module := `LeanerLang.Elab }, { module := `LeanerLang.Addresses }] {}
+    (loadExts := true)
 
 /-- Runtime printer entry point for generators without an existing Lean
 environment. -/

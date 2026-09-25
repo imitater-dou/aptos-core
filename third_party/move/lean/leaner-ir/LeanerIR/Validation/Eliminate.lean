@@ -1,6 +1,7 @@
 -- Copyright © Aptos Foundation
 -- SPDX-License-Identifier: Apache-2.0
 
+import LeanerIR.Validation.IndexedArena
 import LeanerIR.Validation.Validated
 
 /-!
@@ -173,23 +174,14 @@ private def replaceAnchors : Nat → List Expr → List (Nat × Expr) → List E
           else node :: replaceAnchors (index + 1) rest patches
       | [] => node :: rest
 
-private def anchorNodeNative (original : Array Expr) (index : Nat) : Expr :=
-  original[index]!
-
-@[implemented_by anchorNodeNative]
-private def anchorNode (original : Array Expr) (index : Nat) : Expr :=
-  original.toList[index]!
-
-private theorem anchorNode_eq (original : Array Expr) (index : Nat) :
-    anchorNode original index = anchorNodeNative original index := by
-  exact Array.getElem!_toList
-
 /-- Batch valid, grouped anchors while preserving the original append order
 and therefore every synthesized expression id. Only the final merge touches
-the full original arena; each marker inspects its original slot once. -/
+the full original arena; each marker reads its original slot through a
+balanced index, which kernel reduction builds once. -/
 private def markAnchorsBatched (original : Array Expr) (unitType : TypeId)
     (reserved : Array ExprId) (marks : Array AnchorMarks)
     (diagnostics : Array Diagnostic) : Array Expr × Array Diagnostic :=
+  let indexed := IndexedArena.ofArray original
   let (_, appended, patches, diagnostics) := marks.foldl
     (init := (original.size, ([] : List Expr), ([] : List (Nat × Expr)), diagnostics))
     fun (next, appended, patches, diagnostics) mark =>
@@ -197,7 +189,7 @@ private def markAnchorsBatched (original : Array Expr) (unitType : TypeId)
         (next, appended, patches, diagnostics.push (.error "LIR-SEMANTIC-LOAN-MARKER"
           s!"internal: loan-death anchor {mark.anchor.index} is a place index" none))
       else
-        let node := anchorNode original mark.anchor.index
+        let node := (indexed.get? mark.anchor.index).getD default
         let (next, appended, current) := if mark.after.isEmpty then
             (next, appended, node)
           else
@@ -251,7 +243,7 @@ def markLoanDeaths (unit : ValidatedUnit) : ValidatedUnit × Array Diagnostic :=
   let marked := Internal.mkValidatedUnit tables unit.profiles namespaces
     unit.dependencies unit.evidence unit.indexes unit.structurizationWitnesses
     unit.resolution unit.initializationCertificates unit.borrowCertificates
-    unit.borrowDiagnostics
+    unit.borrowRejections
   (marked, diagnostics)
 
 end LeanerIR.Validation

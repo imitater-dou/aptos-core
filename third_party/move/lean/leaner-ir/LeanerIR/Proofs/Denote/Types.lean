@@ -1256,14 +1256,25 @@ def ModularOp.run (op : ModularOp) {width : Nat} {signed : Bool}
 /-- Bitwise operations on unsigned integers. -/
 inductive BitOp where
   | and
+  | or
+  | xor
   deriving DecidableEq, Repr, Inhabited
 
-/-- The mathematical value of a bitwise operation. -/
+/-- The mathematical value of a bitwise operation: on the bit patterns of
+nonnegative operands, as the runtime computes it. -/
 def BitOp.eval : BitOp → Int → Int → Int
   | .and => IntegerArithmetic.bitwiseAnd
+  | .or => fun left right => Int.ofNat (left.toNat ||| right.toNat)
+  | .xor => fun left right => Int.ofNat (left.toNat ^^^ right.toNat)
 
 @[simp] theorem BitOp.eval_and (left right : Int) :
     BitOp.and.eval left right = IntegerArithmetic.bitwiseAnd left right := rfl
+
+@[simp] theorem BitOp.eval_or (left right : Int) :
+    BitOp.or.eval left right = Int.ofNat (left.toNat ||| right.toNat) := rfl
+
+@[simp] theorem BitOp.eval_xor (left right : Int) :
+    BitOp.xor.eval left right = Int.ofNat (left.toNat ^^^ right.toNat) := rfl
 
 theorem BitOp.eval_bounds (op : BitOp) {width : Nat}
     (left right : SpecInt (.bits width) false) :
@@ -1271,11 +1282,23 @@ theorem BitOp.eval_bounds (op : BitOp) {width : Nat}
   obtain ⟨leftLower, leftUpper⟩ := left.unsigned_bounds
   obtain ⟨rightLower, rightUpper⟩ := right.unsigned_bounds
   have pow : ((2 ^ width : Nat) : Int) = (2 : Int) ^ width := Int.natCast_pow 2 width
-  cases op
-  simp only [BitOp.eval, IntegerArithmetic.bitwiseAnd_nonnegative _ _ leftLower rightLower,
-    Int.ofNat_eq_natCast]
-  have := Nat.and_le_left (n := left.val.toNat) (m := right.val.toNat)
-  omega
+  have positive := Nat.two_pow_pos width
+  have leftBelow : left.val.toNat < 2 ^ width := by omega
+  have rightBelow : right.val.toNat < 2 ^ width := by omega
+  cases op with
+  | and =>
+      simp only [BitOp.eval, IntegerArithmetic.bitwiseAnd_nonnegative _ _ leftLower rightLower,
+        Int.ofNat_eq_natCast]
+      have := Nat.and_le_left (n := left.val.toNat) (m := right.val.toNat)
+      omega
+  | or =>
+      simp only [BitOp.eval, Int.ofNat_eq_natCast]
+      have := Nat.or_lt_two_pow leftBelow rightBelow
+      omega
+  | xor =>
+      simp only [BitOp.eval, Int.ofNat_eq_natCast]
+      have := Nat.xor_lt_two_pow leftBelow rightBelow
+      omega
 
 /-- Bitwise operation on certified unsigned integers. -/
 def BitOp.run (op : BitOp) {width : Nat} (left right : SpecInt (.bits width) false) :
@@ -1378,6 +1401,57 @@ def checkedShiftLeft (failure : ThrowKind) {width distanceWidth : Nat}
     Spec.pure (SpecInt.ofBounds value (Int.shiftLeft value.val distance.val.toNat % 2 ^ width)
       (shiftLeft_mod_bounds _ _ value.width_nonzero))
   else Spec.abort (failure, #[.integer distance.val])
+
+/-- A certified unsigned value shifted left stays below a modulus at least
+the power of two its width and the distance reach: the modulus is idle. -/
+theorem shiftLeft_emod_of_fits {width : Nat} (value : SpecInt (.bits width) false)
+    (distance : Nat) (modulus : Int) (fits : (2 : Int) ^ (width + distance) ≤ modulus) :
+    Int.shiftLeft value.val distance % modulus = Int.shiftLeft value.val distance := by
+  obtain ⟨lower, upper⟩ := value.unsigned_bounds
+  have shifted : Int.shiftLeft value.val distance = value.val * 2 ^ distance := by
+    show value.val <<< distance = _
+    rw [Int.shiftLeft_eq]
+  have positive : (0 : Int) < 2 ^ distance := Int.pow_pos (by decide)
+  have below : value.val * 2 ^ distance < 2 ^ (width + distance) := by
+    rw [Int.pow_add]
+    exact Int.mul_lt_mul_of_pos_right (by omega) positive
+  rw [shifted]
+  exact Int.emod_eq_of_lt (Int.mul_nonneg lower (Int.le_of_lt positive)) (by omega)
+
+/-- The truncating form of `shiftLeft_emod_of_fits`: on a nonnegative
+value both remainders agree. -/
+theorem shiftLeft_tmod_of_fits {width : Nat} (value : SpecInt (.bits width) false)
+    (distance : Nat) (modulus : Int) (fits : (2 : Int) ^ (width + distance) ≤ modulus) :
+    (Int.shiftLeft value.val distance).tmod modulus = Int.shiftLeft value.val distance := by
+  have nonnegative : 0 ≤ Int.shiftLeft value.val distance := by
+    show 0 ≤ value.val <<< distance
+    rw [Int.shiftLeft_eq]
+    exact Int.mul_nonneg value.unsigned_bounds.1 (Int.pow_nonneg (by decide))
+  rw [Int.tmod_eq_emod_of_nonneg nonnegative]
+  exact shiftLeft_emod_of_fits value distance modulus fits
+
+/-- A shift left is a multiplication by a power of two, which `omega` reads. -/
+theorem shiftLeft_eq_mul (value : Int) (distance : Nat) :
+    Int.shiftLeft value distance = value * 2 ^ distance := by
+  show value <<< distance = _
+  rw [Int.shiftLeft_eq]
+
+/-- A shift right is a division by a power of two, which `omega` reads. -/
+theorem shiftRight_eq_div (value : Int) (distance : Nat) :
+    Int.shiftRight value distance = value / 2 ^ distance := by
+  rw [← Int.shiftRight_eq, Int.shiftRight_eq_div_pow]
+  simp
+
+/-- The bounds of a product of unsigned certified integers, in the form
+`omega` reads with the product as an atom. -/
+theorem mul_unsigned_bounds {leftWidth rightWidth : Nat} (left : SpecInt (.bits leftWidth) false)
+    (right : SpecInt (.bits rightWidth) false) :
+    0 ≤ left.val * right.val ∧
+      left.val * right.val ≤ (2 ^ leftWidth - 1) * (2 ^ rightWidth - 1) := by
+  obtain ⟨leftLower, leftUpper⟩ := left.unsigned_bounds
+  obtain ⟨rightLower, rightUpper⟩ := right.unsigned_bounds
+  exact ⟨Int.mul_nonneg leftLower rightLower,
+    Int.mul_le_mul leftUpper rightUpper rightLower (Int.le_trans leftLower leftUpper)⟩
 
 theorem shiftRight_bounds {width : Nat} (value : SpecInt (.bits width) false) (distance : Nat) :
     0 ≤ Int.shiftRight value.val distance ∧ Int.shiftRight value.val distance ≤ 2 ^ width - 1 := by
@@ -1520,7 +1594,7 @@ attribute [lir_denote] wp_ite wp_bottom wp_checked_add wp_checked_subtract wp_ch
   ModularOp.run_val ModularOp.eval_add ModularOp.eval_subtract ModularOp.eval_multiply
   foundIndex_val foundIndexOf reverseRange_zero
   wrapInt_unsigned wrapInt_signed
-  BitOp.eval_and CompareOp.decide_less CompareOp.decide_greater CompareOp.decide_lessEqual
+  BitOp.eval_and BitOp.eval_or BitOp.eval_xor CompareOp.decide_less CompareOp.decide_greater CompareOp.decide_lessEqual
   CompareOp.decide_greaterEqual NTy.eqb_int NTy.eqb_bool NTy.eqb_address NTy.eqb_unit
   NTy.eqb_param
   IntegerValueFits_unsigned_succ IntegerValueFits_signed_succ initialEnv

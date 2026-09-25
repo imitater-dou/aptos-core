@@ -337,6 +337,8 @@ syntax (name := leanerNegativeTypedIntegerExpr)
     kwUSize <|> kwISize) : leanerExpr
 syntax (name := leanerAddressExpr) kwAddressLiteral "(" str ")" : leanerExpr
 syntax (name := leanerMoveAddressExpr) "@" num : leanerExpr
+/-- A Move named address as a value: `@std`, the address `std` stands for. -/
+syntax (name := leanerMoveAliasAddressExpr) "@" ident : leanerExpr
 syntax (name := leanerStringExpr) str : leanerExpr
 syntax (name := leanerByteStringExpr) atomic(kwByteStringPrefix str) : leanerExpr
 syntax (name := leanerBytesExpr) "b[" num,* "]" : leanerExpr
@@ -459,9 +461,11 @@ syntax (name := leanerConstructorFieldSyntax)
   leanerFieldIdentifier ":=" leanerExpr : leanerConstructorField
 syntax (name := leanerConstructorFieldShorthandSyntax)
   leanerIdentifier : leanerConstructorField
+-- Atomic up to its brace, so that a local named `new` is an identifier
+-- wherever no construction follows it.
 syntax (name := leanerNamedConstructExpr) (priority := low)
-  kwNew leanerType (leanerConstructorVariant)?
-    "{" leanerConstructorField,* "}" : leanerExpr
+  atomic(kwNew leanerType (leanerConstructorVariant)? "{") leanerConstructorField,* "}" :
+    leanerExpr
 declare_syntax_cat leanerFieldName
 syntax (name := leanerFieldNameSyntax) leanerFieldIdentifier : leanerFieldName
 syntax (name := leanerSelectExpr)

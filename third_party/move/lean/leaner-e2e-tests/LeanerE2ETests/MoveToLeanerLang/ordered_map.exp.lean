@@ -5,7 +5,7 @@ import LeanerLang
 
 /-! The core of an ordered map: entries kept sorted by key, binary search. -/
 leaner module 0x42::ordered_map where
-  use 0x1::std::vector
+  use std::vector
 
   struct Entry has Copy, Drop, Store where
     key : u64
@@ -55,7 +55,7 @@ leaner module 0x42::ordered_map where
     map.entries := core.prim.pushVector(map.entries, new Entry { key, value })
     let i := map.entries.length - 1
     while i > index do
-      map.entries.swap(i, i - 1)
+      map.entries := core.prim.swapVector(map.entries, i, i - 1)
       i := i - 1
 
   public fun remove(map : &mut Map, key : u64) -> u64 := do

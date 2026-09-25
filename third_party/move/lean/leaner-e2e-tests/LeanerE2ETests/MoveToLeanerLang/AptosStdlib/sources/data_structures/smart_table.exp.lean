@@ -14,20 +14,20 @@ it tolerates collisions.
 DEPRECATED: since it's implementation is inneficient, it
 has been deprecated in favor of `big_ordered_map.move`.
 -/
-leaner module 0x1::smart_table where
-  use 0x1::aptos_std::aptos_hash::sip_hash_from_value
-  use 0x1::aptos_std::math64::max
-  use 0x1::aptos_std::simple_map
-  use 0x1::aptos_std::simple_map::SimpleMap
-  use 0x1::aptos_std::table_with_length
-  use 0x1::aptos_std::table_with_length::TableWithLength
-  use 0x1::aptos_std::type_info::size_of_val
-  use 0x1::std::error::invalid_argument
-  use 0x1::std::error::permission_denied
-  use 0x1::std::option::Option
-  use 0x1::std::option::none
-  use 0x1::std::option::some
-  use 0x1::std::vector
+leaner module aptos_std::smart_table where
+  use aptos_std::aptos_hash::sip_hash_from_value
+  use aptos_std::math64::max
+  use aptos_std::simple_map
+  use aptos_std::simple_map::SimpleMap
+  use aptos_std::table_with_length
+  use aptos_std::table_with_length::TableWithLength
+  use aptos_std::type_info::size_of_val
+  use std::error::invalid_argument
+  use std::error::permission_denied
+  use std::option::Option
+  use std::option::none
+  use std::option::some
+  use std::vector
 
   /--
   Key not found in the smart table
@@ -149,7 +149,9 @@ leaner module 0x1::smart_table where
   public fun destroy_empty {K} {V}(self : SmartTable<K, V>) -> Unit := do
     assert!(self.size == 0, invalid_argument(ENOT_EMPTY))
     for i in 0..self.num_buckets do
-      table_with_length::remove(&mut self.buckets, i).destroy_empty()
+      core.prim.destroyEmptyVector(
+        table_with_length::remove(&mut self.buckets, i)
+      )
     let SmartTable<K, V> { buckets := buckets,
     num_buckets := _,
     level := _,
@@ -250,7 +252,19 @@ leaner module 0x1::smart_table where
     let len := self'.length
     assert!(len == v2.length, 131074)
     while len > 0 do
-      let (e1, e2) := (self'.pop_back(), v2.pop_back())
+      let (e1, e2) :=
+        (do
+            let _t0 := &mut self'
+            if _t0.length == 0 then moveVectorError(2)
+            let (_t1, _t2) := core.prim.removeVector(*_t0, _t0.length - 1)
+            *_t0 := _t2
+            _t1,
+          do
+            let _t3 := &mut v2
+            if _t3.length == 0 then moveVectorError(2)
+            let (_t4, _t5) := core.prim.removeVector(*_t3, _t3.length - 1)
+            *_t3 := _t5
+            _t4)
       let (key, value) := (e1, e2)
       self.add(key, value)
       len := len - 1
@@ -265,8 +279,8 @@ leaner module 0x1::smart_table where
       invariant ∀ (j in 0 .. len), v2[j] == with_state_anchor!(60, old(v2))[j]
       invariant ∀ (j in len .. with_state_anchor!(60, old(self')).length), true
       invariant true
-    self'.destroy_empty()
-    v2.destroy_empty()
+    core.prim.destroyEmptyVector(self')
+    core.prim.destroyEmptyVector(v2)
 
   spec add_all where
     pragma verify = false
@@ -419,7 +433,7 @@ leaner module 0x1::smart_table where
             let «entry» := e
             bucket_index(self.level, self.num_buckets, «entry».hash)
               != new_bucket_index) then
-            self'.swap(p, i)
+            *self' := core.prim.swapVector(*self', p, i)
             p := p + 1
           i := i + 1
         p

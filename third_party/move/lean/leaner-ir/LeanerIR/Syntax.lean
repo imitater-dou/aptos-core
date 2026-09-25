@@ -80,10 +80,17 @@ structure Alignment where
   deriving Repr, BEq, Inhabited
 
 /-- Interned hierarchical namespace identity. Profiles interpret segments as
-appropriate—for example, a Move address/alias/module tuple or Rust modules. -/
+appropriate: a Move module is its address and name, a Rust namespace its
+crate and module path. `alias` is only how the source spells the leading
+segment (a Move named address such as `std` for `0x1`); identity, and so
+equality, is the segments alone. -/
 structure NamespaceRef where
   segments : Array String
-  deriving Repr, BEq, Inhabited
+  alias : Option String := none
+  deriving Repr, Inhabited
+
+instance : BEq NamespaceRef where
+  beq left right := left.segments == right.segments
 
 /-- Interned declaration spelling paired with the namespace table entry that
 owns it. A `NameId` indexes an array of these values. -/

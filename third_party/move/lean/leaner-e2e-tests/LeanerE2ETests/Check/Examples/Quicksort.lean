@@ -52,7 +52,9 @@ leaner module 0x42::quicksort where
       invariant same_counts(original, values, store, pivot_index + 1)
     values := core.prim.swapVector(values, lo, pivot_index)
     new PartitionResult<T> { values := values, pivot := lo }
+  -- Opaque: callers reason through the contract, not the loop.
   spec partition where
+    pragma opaque
     requires store <= pivot_index && pivot_index < values.length
     ensures result.values.length == values.length
     ensures store <= result.pivot && result.pivot <= pivot_index

@@ -1,0 +1,4 @@
+LeanerE2ETests/Check/Scalars/BitVectors.lean:48:4: error: the specification clause `ensures result == byte` is not established
+LeanerE2ETests/Check/Scalars/BitVectors.lean:45:7: error: leaner verification failed
+LeanerE2ETests/Check/Scalars/BitVectors.lean:57:4: error: the specification clause `ensures result == spec_contains(flags, flag)` is not established
+LeanerE2ETests/Check/Scalars/BitVectors.lean:55:7: error: leaner verification failed

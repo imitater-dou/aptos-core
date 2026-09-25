@@ -128,7 +128,7 @@ example :
     «0x42».verification_references.unit.borrowCertificates[11]!
       |>.loans[0]!.deaths.isEmpty = false := by decide
 example :
-    «0x42».verification_references.unit.borrowDiagnostics.isEmpty = true := by
+    «0x42».verification_references.unit.borrowRejections.isEmpty = true := by
   decide
 
 -- Run the functions on concrete inputs in the interpreter and compare the

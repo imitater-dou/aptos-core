@@ -5,6 +5,7 @@ import LeanerIR.Import.Json
 import LeanerIR.Validation.Check
 import LeanerIR.Validation.Initialization
 import LeanerIR.Validation.Capability
+import LeanerIR.Validation.Link
 import LeanerIR.Semantics.Runtime
 import LeanerIR.Semantics.Operations
 import LeanerIR.Semantics.BigStep

@@ -6,19 +6,35 @@ import Lean
 /-!
 # `simp_all`, corrected
 
-A copy of Lean 4.32's `Lean.Meta.SimpAll` with one correction in
-`SimpAll.loop`: when a hypothesis is modified, the theorem set drops the
-hypothesis's *current* id rather than only its original one.  Without it,
-a hypothesis modified in two rounds keeps a stale copy of its first form
-in the set, and that copy rewrites the hypothesis's own conjuncts to
-`True` in the next round, silently dropping facts a leaf needs.  Original
-authors: Leonardo de Moura (Microsoft Corporation, Apache 2.0).
+A copy of Lean 4.32's `Lean.Meta.SimpAll` with two corrections, and a
+context without branch conditions. In `SimpAll.loop`, when a hypothesis is
+modified, the theorem set drops the hypothesis's *current* id rather than
+only its original one: otherwise a hypothesis modified in two rounds keeps
+a stale copy of its first form in the set, and that copy rewrites the
+hypothesis's own conjuncts to `True` in the next round, silently dropping
+facts a leaf needs. And an equation whose left side occurs in its right
+side is no rewrite rule, as rewriting with it would not terminate; for the
+same reason a conditional's condition is not a rewrite rule in its branches.
+Original authors: Leonardo de Moura (Microsoft Corporation, Apache 2.0).
 -/
 
 namespace LeanerIR.Proofs.Denote
 
 open Lean Meta
 open Simp (Stats SimprocsArray)
+
+/-- Whether an equation's left side occurs in its right side: rewriting
+with it would not terminate, so it stays a fact but is no rewrite rule. -/
+def selfReferential (type : Expr) : MetaM Bool := do
+  let some (_, left, right) := type.eq? | return false
+  -- An instance as rewriting finds one, up to reducible unfolding.
+  return (← kabstract right left).hasLooseBVars
+
+/-- The congruences without the ones that take a conditional's condition as
+a rewrite rule into its branches: a condition such as `x = x / k * k`
+would rewrite without end, and a leaf splits its conditionals anyway. -/
+def withoutBranchConditions (congruences : SimpCongrTheorems) : SimpCongrTheorems :=
+  { lemmas := (congruences.lemmas.insert ``ite []).insert ``dite [] }
 
 namespace SimpAll
 
@@ -51,8 +67,9 @@ private def initEntries : M Unit := do
       let localDecl ← h.getDecl
       let proof  := localDecl.toExpr
       let ctx := (← get).ctx
-      simpThms ← simpThms.addTheorem (.fvar h) proof (config := ctx.indexConfig)
-      modify fun s => { s with ctx := s.ctx.setSimpTheorems simpThms }
+      unless ← selfReferential (← instantiateMVars localDecl.type) do
+        simpThms ← simpThms.addTheorem (.fvar h) proof (config := ctx.indexConfig)
+        modify fun s => { s with ctx := s.ctx.setSimpTheorems simpThms }
       if hsNonDeps.contains h then
         -- We only simplify nondependent hypotheses
         let type ← instantiateMVars localDecl.type
@@ -109,7 +126,8 @@ private partial def loop : M Bool := do
         -- `True` in a later round.
         let mut simpThmsNew := (← getSimpTheorems).eraseTheorem entry.id
         let idNew ← mkFreshId
-        simpThmsNew ← simpThmsNew.addTheorem (.other idNew) (← mkExpectedTypeHint proofNew typeNew) (config := ctx.indexConfig)
+        unless ← selfReferential typeNew do
+          simpThmsNew ← simpThmsNew.addTheorem (.other idNew) (← mkExpectedTypeHint proofNew typeNew) (config := ctx.indexConfig)
         modify fun s => { s with
           modified         := true
           ctx              := ctx.setSimpTheorems simpThmsNew
@@ -174,6 +192,7 @@ syntax (name := leanerSimpAll) "leaner_simp_all" optConfig (Lean.Parser.Tactic.d
 open Lean.Elab Lean.Elab.Tactic in
 @[tactic leanerSimpAll] def evalLeanerSimpAll : Tactic := fun stx => withMainContext do
   let { ctx, simprocs, .. } ← mkSimpContext stx (eraseLocal := true) (kind := .simpAll) (ignoreStarArg := true)
+  let ctx ← Simp.mkContext ctx.config ctx.simpTheorems (withoutBranchConditions ctx.congrTheorems)
   let (result?, _) ← simpAllFixed (← getMainGoal) ctx (simprocs := simprocs)
   match result? with
   | none => replaceMainGoal []

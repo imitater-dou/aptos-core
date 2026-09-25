@@ -1,5 +1,8 @@
 # Test organization and check ledger
 
+**Archive, not current status.** Replaced on 2026-09-27 by the test ledger
+of [the roadmap](../roadmap.md#tests); kept for its per-file notes.
+
 Updated 2026-09-24 (denotation route, [`denotation.md`](denotation.md)). This is the ledger of the acceptance
 fixtures under
 [`leaner-e2e-tests/LeanerE2ETests/Check/`](../leaner-e2e-tests/LeanerE2ETests/Check/):
@@ -37,6 +40,7 @@ not make it pass if its positive control fails.
 |---|---|---|
 | `Addresses` | PASS | |
 | `Arithmetic` | PASS | |
+| `BitVectors` | PASS | Under `pragma bv`, bit-flag set and test verify over bit vectors; a wrong postcondition is refuted, and the same leaf without the pragma is not decided (intended negatives). |
 | `Integers` | PASS | |
 | `Literals` | PASS | |
 | `Order` | PASS | Since 2026-09-23: `compare` on integers and at a type parameter; an authored `verify … by` proof of transitivity. |
@@ -116,15 +120,19 @@ not make it pass if its positive control fails.
 
 | File | Status | Remaining problem |
 |---|---|---|
-| `Callees` | PASS | Since 2026-09-23 (D6): `drain` verifies by fixed-point induction and `call_drain` through its contract; unspecified pure callees are inlined, nested ones included; a callee reaching itself only through inlined callees is rejected. |
+| `AbstractClauses` | PASS | A `[concrete]` clause is proved of the body, an `[abstract]` one is assumed by callers through the contract; a caller does not see the concrete result (intended negative). |
+| `Callees` | PASS | Since 2026-09-23 (D6): `drain` verifies by fixed-point induction and `call_drain` through its contract; other callees are inlined, specified or not, nested ones included; a callee reaching itself only through inlined callees is rejected. |
 | `Calls` | PASS | `recursive_choose` verifies by fixed-point induction (D6). |
 | `Composition` | PASS | |
+| `InlinedCallees` | PASS | Specified callees are inlined with their loops and invariants; nested calls read each call's own `old`; an opaque callee's body is not seen (intended negative). |
+| `Modules` | PASS | Calls into other modules: inlined through the chain of modules a module uses, an opaque callee of another module used through its contract, a type of another module, functions of different modules sharing a name; a postcondition a callee of another module refutes (intended negative). |
 | `Summaries` | PASS | Since 2026-09-23: callers of natives assume the natives' contracts, transitively through verified callees; opaque functions are summarized by their contracts. |
 
 ### Generics (generic types and functions, generic storage)
 
 | File | Status | Remaining problem |
 |---|---|---|
+| `GenericCycles` | PASS | Since 2026-09-25 (D6): generic mutual recursion and a cycle through a generic and a non-generic member, proved at every family and instantiation. |
 | `GenericFunctions` | PASS | Since 2026-09-23 (D3a). `take` pins that a loan on a generic field ends where its holder dies. |
 | `GenericScalarCalls` | PASS | Since 2026-09-23 (D3a): each scalar caller's typed proof uses its generic callee's theorem. |
 | `GenericStorage` | PASS | Since 2026-09-23 (D3b): storage over `Vault<T>` keyed by the frame's instantiation, concrete callers through kernel-checked frame instantiations, `Vault<u64>` through the generic twin's bridge. |
@@ -135,6 +143,7 @@ not make it pass if its positive control fails.
 | File | Status | Remaining problem |
 |---|---|---|
 | `ContractErrors` | PASS | Since 2026-09-24 also a contract ignoring a write after a freeze, writes through returned references, and cycles of calls (one wrong contract fails the cycle; an unspecified member is rejected); a failing clause after a call is reported at the clause. |
+| `DomainQuantifiers` | PASS | Quantifiers over a range and over a vector (by index, as in the Move Prover); an existential no index satisfies and one over an empty vector (intended negatives). Closing a quantifier that needs instantiation at index terms is not yet automatic. |
 | `Increment` | PASS | |
 | `RecursiveSpecFunctions` | PASS | Since 2026-09-23: a recursive `spec fun` with a `decreases` measure as a Lean definition, a lemma by induction through its unfolding theorem, and a `verify … by` using it, both items of the module (2026-09-24). Quicksort likewise keeps its count lemmas and verifies in its module. |
 | `SpecFunctionErrors` | PASS | Since 2026-09-23. Five v0 rejections are retired (see the file's header). |
@@ -159,7 +168,7 @@ not make it pass if its positive control fails.
 | `Account` | PASS | |
 | `Corpus` | PASS | |
 | `OrderedMap` | PASS | Since 2026-09-24: v0's nine proof-carrying targets over a generic sorted-vector map with increasing keys as its data invariant. `empty`, `lower_bound`, `length`, `borrow_key_at` close automatically; the recursive binary search, `contains`, `borrow`, `add`, and `remove` through lemmas over arrays (search window, presence and absence at the lower bound, sortedness and shape after insertion or removal). v0's eight execution scenarios run at `u64` and `Bool` keys; `borrow_key_at` and `borrow` return a reborrow through a local holding a reborrow of the parameter. |
-| `Quicksort` | PASS | Since 2026-09-24: v0's three proof-carrying targets. The generic Lomuto `partition` (quantified loop invariants over the structural order, the working range's frame and counts) and the generic recursive `quick_sort_range` (sortedness, frame, and counts of the range) through authored proofs; `quick_sort` automatically. The permutation is stated by counts, a recursive `spec fun`; the count lemmas (split, congruence, membership) go through its unfolding theorem, and the recursive sort's three residual goals are composition lemmas over arrays. v0's five execution cases run through concrete wrappers. `partition` costs 260M heartbeats (`set_option leaner.verifyHeartbeats 400000`). |
+| `Quicksort` | PASS | Since 2026-09-24: v0's three proof-carrying targets. The generic Lomuto `partition` (quantified loop invariants over the structural order, the working range's frame and counts) and the generic recursive `quick_sort_range` (sortedness, frame, and counts of the range) through authored proofs; `quick_sort` automatically. The permutation is stated by counts, a recursive `spec fun`; the count lemmas (split, congruence, membership) go through its unfolding theorem, and the recursive sort's three residual goals are composition lemmas over arrays. v0's five execution cases run through concrete wrappers. `partition` costs 277M heartbeats (`set_option leaner.verifyHeartbeats 400000`; 2026-09-25, after the closer's residual deciders stopped unfolding at default transparency). |
 
 ### Missing v0 fixtures
 

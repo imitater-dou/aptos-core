@@ -1607,7 +1607,7 @@ private def primitiveTypeDiagnostics (ns : ValidatedNamespace) (logical : Bool)
   | .swapVector | .reverseSliceVector =>
       swapVectorPrimitiveDiagnostics ns logical loc resultType arguments
   | .checkVectorIndex _ =>
-      let resultErrors := if ns.tables.types[resultType.index]? == some .unit then #[]
+      let resultErrors := if isUnitType ns resultType then #[]
         else typeMismatch loc "vector index check must return unit"
       match arguments.toList with
       | [vector, index] =>
@@ -1629,7 +1629,7 @@ private def primitiveTypeDiagnostics (ns : ValidatedNamespace) (logical : Bool)
           | _ => resultErrors ++ typeMismatch loc "a signer's address requires a &Signer"
       | _ => resultErrors
   | .destroyEmptyVector =>
-      let resultErrors := if ns.tables.types[resultType.index]? == some .unit then #[]
+      let resultErrors := if isUnitType ns resultType then #[]
         else typeMismatch loc "empty-vector destruction must return unit"
       match arguments.toList with
       | [vector] => match exprType? ns vector >>= (ns.tables.types[·.index]?) with
@@ -4565,7 +4565,7 @@ def applySharedReferenceErasureArenas (marked : ValidatedUnit)
   Internal.mkValidatedUnit marked.tables marked.profiles namespaces
     marked.dependencies marked.evidence marked.indexes marked.structurizationWitnesses
     marked.resolution marked.initializationCertificates marked.borrowCertificates
-    marked.borrowDiagnostics
+    marked.borrowRejections
 
 def applySharedReferenceErasure (marked : ValidatedUnit)
     (plan : SharedReferenceErasurePlan) : ValidatedUnit :=

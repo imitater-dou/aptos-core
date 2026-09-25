@@ -505,6 +505,8 @@ structure FunctionDecl where
   result : Located Ty := { value := .unit }
   body : Option Expr := none
   contract : Array ContractClause := #[]
+  /-- The `spec` item the contract was declared in. -/
+  contractSpan : Option Span := none
   pragmas : Array Pragma := #[]
   attributes : Array SourceAttribute := #[]
   span : Span := {}
@@ -544,6 +546,8 @@ structure StructDecl where
   fields : Array FieldDecl := #[]
   abilities : Array Ability := #[]
   contract : Array ContractClause := #[]
+  /-- The `spec` item the contract was declared in. -/
+  contractSpan : Option Span := none
   pragmas : Array Pragma := #[]
   attributes : Array SourceAttribute := #[]
   span : Span := {}
@@ -562,6 +566,8 @@ structure EnumDecl where
   variants : Array VariantDecl := #[]
   abilities : Array Ability := #[]
   contract : Array ContractClause := #[]
+  /-- The `spec` item the contract was declared in. -/
+  contractSpan : Option Span := none
   pragmas : Array Pragma := #[]
   attributes : Array SourceAttribute := #[]
   span : Span := {}
@@ -607,6 +613,9 @@ structure Namespace where
   pragmas : Array Pragma := #[]
   comments : Array Comment := #[]
   items : Array Item := #[]
+  /-- The Move address alias each module was spelled with, by its canonical
+  path (address and name). -/
+  aliases : Array (Array String × String) := #[]
   span : Span := {}
   deriving Repr, BEq, Inhabited
 

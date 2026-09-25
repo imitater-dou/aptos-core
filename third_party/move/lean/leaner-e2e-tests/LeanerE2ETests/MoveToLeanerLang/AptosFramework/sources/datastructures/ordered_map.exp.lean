@@ -33,24 +33,24 @@ That's why all functions returning iterators are prefixed with "internal_", to c
 sure usage is correct.
 A set of inline utility methods is provided instead, to provide guaranteed valid usage to iterators.
 -/
-leaner module 0x1::ordered_map where
-  use 0x1::std::cmp::Ordering
-  use 0x1::std::cmp::compare
-  use 0x1::std::cmp::is_eq
-  use 0x1::std::cmp::is_gt
-  use 0x1::std::cmp::is_lt
-  use 0x1::std::error::invalid_argument
-  use 0x1::std::option
-  use 0x1::std::option::Option
-  use 0x1::std::option::is_none
-  use 0x1::std::option::is_some
-  use 0x1::std::option::none
-  use 0x1::std::option::some
-  use 0x1::std::option::spec_borrow
-  use 0x1::std::option::spec_is_none
-  use 0x1::std::option::spec_is_some
-  use 0x1::std::vector
-  use 0x1::std::vector::spec_contains
+leaner module aptos_framework::ordered_map where
+  use std::cmp::Ordering
+  use std::cmp::compare
+  use std::cmp::is_eq
+  use std::cmp::is_gt
+  use std::cmp::is_lt
+  use std::error::invalid_argument
+  use std::option
+  use std::option::Option
+  use std::option::is_none
+  use std::option::is_some
+  use std::option::none
+  use std::option::some
+  use std::option::spec_borrow
+  use std::option::spec_is_none
+  use std::option::spec_is_some
+  use std::vector
+  use std::vector::spec_contains
 
   friend aptos_framework::big_ordered_map;
 
@@ -308,7 +308,19 @@ leaner module 0x1::ordered_map where
     let len := self'.length
     assert!(len == v2.length, 131074)
     while len > 0 do
-      let (e1, e2) := (self'.pop_back(), v2.pop_back())
+      let (e1, e2) :=
+        (do
+            let _t3 := &mut self'
+            if _t3.length == 0 then moveVectorError(2)
+            let (_t4, _t5) := core.prim.removeVector(*_t3, _t3.length - 1)
+            *_t3 := _t5
+            _t4,
+          do
+            let _t6 := &mut v2
+            if _t6.length == 0 then moveVectorError(2)
+            let (_t7, _t8) := core.prim.removeVector(*_t6, _t6.length - 1)
+            *_t6 := _t8
+            _t7)
       let (key, value) := (e1, e2)
       self.add(key, value)
       len := len - 1
@@ -323,8 +335,8 @@ leaner module 0x1::ordered_map where
       invariant ∀ (j in 0 .. len), v2[j] == with_state_anchor!(25, old(v2))[j]
       invariant ∀ (j in len .. with_state_anchor!(25, old(self')).length), true
       invariant true
-    self'.destroy_empty()
-    v2.destroy_empty()
+    core.prim.destroyEmptyVector(self')
+    core.prim.destroyEmptyVector(v2)
 
   spec add_all where
     pragma intrinsic
@@ -346,7 +358,19 @@ leaner module 0x1::ordered_map where
     let len := self'.length
     assert!(len == v2.length, 131074)
     while len > 0 do
-      let (e1, e2) := (self'.pop_back(), v2.pop_back())
+      let (e1, e2) :=
+        (do
+            let _t21 := &mut self'
+            if _t21.length == 0 then moveVectorError(2)
+            let (_t22, _t23) := core.prim.removeVector(*_t21, _t21.length - 1)
+            *_t21 := _t23
+            _t22,
+          do
+            let _t24 := &mut v2
+            if _t24.length == 0 then moveVectorError(2)
+            let (_t25, _t26) := core.prim.removeVector(*_t24, _t24.length - 1)
+            *_t24 := _t26
+            _t25)
       let (key, value) := (e1, e2)
       self.upsert(key, value)
       len := len - 1
@@ -361,8 +385,8 @@ leaner module 0x1::ordered_map where
       invariant ∀ (j in 0 .. len), v2[j] == with_state_anchor!(43, old(v2))[j]
       invariant ∀ (j in len .. with_state_anchor!(43, old(self')).length), true
       invariant true
-    self'.destroy_empty()
-    v2.destroy_empty()
+    core.prim.destroyEmptyVector(self')
+    core.prim.destroyEmptyVector(v2)
 
   spec upsert_all where
     pragma intrinsic
@@ -391,7 +415,7 @@ leaner module 0x1::ordered_map where
   ) -> Unit := do
     let overwritten := self.append_impl(other)
     assert!(overwritten.length == 0, invalid_argument(EKEY_ALREADY_EXISTS))
-    overwritten.destroy_empty()
+    core.prim.destroyEmptyVector(overwritten)
 
   spec append_disjoint where
     pragma intrinsic
@@ -406,7 +430,7 @@ leaner module 0x1::ordered_map where
       other
     let mut overwritten := vector<Entry<K, V> >[]
     if other_entries.is_empty() then
-      other_entries.destroy_empty()
+      core.prim.destroyEmptyVector(other_entries)
       return overwritten;
     if self.entries.is_empty() then
       self.entries.append(other_entries)
@@ -426,8 +450,13 @@ leaner module 0x1::ordered_map where
       let ord := compare(&self.entries[cur_i].key, &other_entries[other_i].key)
       if is_gt(&ord) then
         reverse_result := core.prim.pushVector(
-          reverse_result, self.entries.pop_back()
-        )
+          reverse_result,
+          do
+            let _t9 := &mut self.entries
+            if _t9.length == 0 then moveVectorError(2)
+            let (_t10, _t11) := core.prim.removeVector(*_t9, _t9.length - 1)
+            *_t9 := _t11
+            _t10)
         if cur_i == 0 then
           self.entries.append(other_entries)
           break
@@ -435,17 +464,27 @@ leaner module 0x1::ordered_map where
       else
         if is_eq(&ord) then
           overwritten := core.prim.pushVector(
-            overwritten, self.entries.pop_back()
-          )
+            overwritten,
+            do
+              let _t12 := &mut self.entries
+              if _t12.length == 0 then moveVectorError(2)
+              let (_t13, _t14) := core.prim.removeVector(*_t12, _t12.length - 1)
+              *_t12 := _t14
+              _t13)
           if cur_i == 0 then
             self.entries.append(other_entries)
             break
           else cur_i := cur_i - 1
         reverse_result := core.prim.pushVector(
-          reverse_result, other_entries.pop_back()
-        )
+          reverse_result,
+          do
+            let _t15 := &mut other_entries
+            if _t15.length == 0 then moveVectorError(2)
+            let (_t16, _t17) := core.prim.removeVector(*_t15, _t15.length - 1)
+            *_t15 := _t17
+            _t16)
         if other_i == 0 then
-          other_entries.destroy_empty()
+          core.prim.destroyEmptyVector(other_entries)
           break
         else other_i := other_i - 1
     self.entries.reverse_append(reverse_result)
@@ -507,7 +546,13 @@ leaner module 0x1::ordered_map where
 
   @[map_pop_back (OrderedMap)]
   public fun pop_back {K} {V}(self : &mut OrderedMap<K, V>) -> (K, V) := do
-    let Entry<K, V> { key := key, value := value } := self.entries.pop_back()
+    let Entry<K, V> { key := key, value := value } :=
+      do
+        let _t0 := &mut self.entries
+        if _t0.length == 0 then moveVectorError(2)
+        let (_t1, _t2) := core.prim.removeVector(*_t0, _t0.length - 1)
+        *_t0 := _t2
+        _t1
     (key, value)
 
   spec pop_back where
@@ -883,7 +928,7 @@ leaner module 0x1::ordered_map where
   @[map_destroy_empty (OrderedMap)]
   public fun destroy_empty {K} {V}(self : OrderedMap<K, V>) -> Unit := do
     let OrderedMap<K, V>::SortedVectorMap { entries := entries } := self
-    entries.destroy_empty()
+    core.prim.destroyEmptyVector(entries)
 
   spec destroy_empty where
     pragma intrinsic
@@ -985,7 +1030,13 @@ leaner module 0x1::ordered_map where
     spec assume folds_capture_anchor!(39)
     let len := self.length
     while len > 0 do
-      let e := self.pop_back()
+      let e :=
+        do
+          let _t18 := &mut self
+          if _t18.length == 0 then moveVectorError(2)
+          let (_t19, _t20) := core.prim.removeVector(*_t18, _t18.length - 1)
+          *_t18 := _t20
+          _t19
       let e := e
       let Entry<K, V> { key := key, value := value } := e
       keys := core.prim.pushVector(keys, key)
@@ -998,7 +1049,7 @@ leaner module 0x1::ordered_map where
         self[j] == with_state_anchor!(39, old(self))[j]
       invariant ∀ (j in len .. with_state_anchor!(39, old(self)).length), true
       invariant true
-    self.destroy_empty()
+    core.prim.destroyEmptyVector(self)
     (keys, values)
 
   spec to_vec_pair where
@@ -1072,7 +1123,7 @@ leaner module 0x1::ordered_map where
       assert spec_contains_key(map, 4)
       assert spec_get(map, 4) == 6
       assert is_some(result_2)
-      assert 0x1::std::option::borrow(result_2) == 5
+      assert std::option::borrow(result_2) == 5
     spec do
       assert keys[0] == 1
       assert spec_contains_key(map, 1)
@@ -1103,7 +1154,7 @@ leaner module 0x1::ordered_map where
       assert keys[1] == 2
       assert spec_contains_key(map, 2)
       assert is_some(result_2)
-      assert 0x1::std::option::borrow(result_2) == 2
+      assert std::option::borrow(result_2) == 2
 
   fun test_verify_prev_key() -> Unit := do
     let keys := vector<u64>[1, 2, 3]

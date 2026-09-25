@@ -4,6 +4,7 @@
 import LeanerIR.Proofs.Denote.Agreement
 import LeanerIR.Proofs.Order
 import LeanerIR.Proofs.Denote.SimpAll
+import LeanerIR.Proofs.Denote.BitLift
 
 /-!
 # Closing the verification condition of a denotation
@@ -28,24 +29,30 @@ register_option leaner.certifyDebug : Bool := {
   descr := "show the residual goal of a specification clause the closer cannot establish"
 }
 
-/-- Marks a verification's arguments and state at the function's start,
-what a loop invariant's `old` reads. A hypothesis rather than an equation,
-so that substitution rewrites it instead of eliminating it. -/
-def FunctionStart {α : Type} (_arguments : α) (_state : LeanerIR.RuntimeState) : Prop := True
+/-- Marks a function's arguments and state at its start, what the `old` of
+its loop invariants reads: the verified function's, and each inlined
+callee's at its call. A hypothesis rather than an equation, so that
+substitution rewrites it instead of eliminating it. -/
+def FunctionStart {α : Type} (_function : LeanerIR.FunctionHandle) (_arguments : α)
+    (_state : LeanerIR.RuntimeState) : Prop := True
 
-theorem FunctionStart.intro {α : Type} (arguments : α) (state : LeanerIR.RuntimeState) :
-    FunctionStart arguments state := trivial
+theorem FunctionStart.intro {α : Type} (function : LeanerIR.FunctionHandle) (arguments : α)
+    (state : LeanerIR.RuntimeState) : FunctionStart function arguments state := trivial
 
-/-- Byte ranges of the `Obligation` markers in an expression. -/
-partial def obligationRanges (expression : Lean.Expr) : Array (Nat × Nat) :=
-  let rec walk (e : Lean.Expr) (found : Array (Nat × Nat)) : Array (Nat × Nat) :=
-    let found :=
-      if e.isAppOfArity ``Obligation 3 then
-        match ((e.getArg! 0).nat? <|> (e.getArg! 0).rawNatLit?),
-            ((e.getArg! 1).nat? <|> (e.getArg! 1).rawNatLit?) with
-        | some startByte, some endByte => found.push (startByte, endByte)
-        | _, _ => found
-      else found
+/-- The range an `Obligation` marker names, when the expression is one. -/
+def obligationRange? (e : Lean.Expr) : Option ObligationRange := do
+  guard <| e.isAppOfArity ``Obligation 4
+  let .lit (.strVal file) := (e.getArg! 0).consumeMData | none
+  let startByte ← (e.getArg! 1).nat? <|> (e.getArg! 1).rawNatLit?
+  let endByte ← (e.getArg! 2).nat? <|> (e.getArg! 2).rawNatLit?
+  pure { file, startByte, endByte }
+
+/-- The ranges of the `Obligation` markers in an expression. -/
+partial def obligationRanges (expression : Lean.Expr) : Array ObligationRange :=
+  let rec walk (e : Lean.Expr) (found : Array ObligationRange) : Array ObligationRange :=
+    let found := match obligationRange? e with
+      | some range => found.push range
+      | none => found
     match e with
     | .app function argument => walk argument (walk function found)
     | .lam _ type body _ => walk body (walk type found)
@@ -70,29 +77,58 @@ def Provenance.describe : Provenance → String
   | .loopEntry => "a loop invariant at entry"
   | .loopIteration => "a loop invariant at an iteration"
 
+/-- What an obligation located at an authored clause says: a loop's
+invariant is owed at entry and after each iteration, any other clause by the
+function. -/
+private def clauseFailure (origin : Option Provenance) (snippet : String) : MessageData :=
+  match origin with
+  | some .loopEntry => m!"the loop invariant `{snippet}` is not established at entry"
+  | some .loopIteration => m!"the loop invariant `{snippet}` is not preserved by an iteration"
+  | _ => m!"the specification clause `{snippet}` is not established"
+
 /-- Report a verification condition that was not established, at every
-authored clause its `Obligation` markers locate not yet in `reported` — or,
-with no marker, as `origin` or a residual obligation with its goal. Returns
-the locations reported so far. -/
+authored clause its `Obligation` markers — those in it and the `clauses` its
+closing stripped — locate not yet reported with the same message, or, with
+no marker, as `origin` or a residual obligation with its goal. Returns the
+reports so far. -/
 def reportObligation (goal : MVarId) (origin : Option Provenance)
-    (reported : Array (Nat × Nat)) : TacticM (Array (Nat × Nat)) := do
+    (clauses : Array ObligationRange) (reported : Array (ObligationRange × String)) :
+    TacticM (Array (ObligationRange × String)) := do
   let fileMap ← getFileMap
+  let fileName ← getFileName
   goal.withContext do
     let target ← instantiateMVars (← goal.getType)
-    let ranges := (obligationRanges target).toList.eraseDups
+    let ranges := (clauses ++ obligationRanges target).toList.eraseDups.filter
+      fun range => range.startByte < range.endByte
     if ranges.isEmpty then
       match origin with
       | some origin => logError m!"{origin.describe} is not established"
       | none => logError m!"verification failed with a residual obligation:\n{(← Lean.Meta.ppGoal goal)}"
     let mut reported := reported
-    for (startByte, endByte) in ranges do
-      if reported.contains (startByte, endByte) then continue
-      reported := reported.push (startByte, endByte)
-      let snippet := Substring.Raw.toString
-        ⟨fileMap.source, ⟨startByte⟩, ⟨endByte⟩⟩
-      let reference := Syntax.atom (.synthetic ⟨startByte⟩ ⟨endByte⟩) snippet
-      logErrorAt reference
-        m!"the specification clause `{snippet}` is not established"
+    for range in ranges do
+      -- A clause of another module's file is reported in that file.
+      let source? ← if range.file == fileName then pure (some fileMap.source) else
+        try some <$> IO.FS.readFile range.file catch _ => pure none
+      let snippet := match source? with
+        | some source => Substring.Raw.toString ⟨source, ⟨range.startByte⟩, ⟨range.endByte⟩⟩
+        | none => s!"{range.file}:{range.startByte}"
+      let message := clauseFailure origin snippet
+      let key := (range, ← message.toString)
+      if reported.contains key then continue
+      reported := reported.push key
+      match source? with
+      | some _ =>
+          if range.file == fileName then
+            logErrorAt (Syntax.atom (.synthetic ⟨range.startByte⟩ ⟨range.endByte⟩) snippet) message
+          else
+            let foreign := FileMap.ofString (source?.getD "")
+            logMessage {
+              fileName := range.file
+              pos := foreign.toPosition ⟨range.startByte⟩
+              endPos := some (foreign.toPosition ⟨range.endByte⟩)
+              severity := .error
+              data := ← addMessageContext message }
+      | none => logError message
     if leaner.certifyDebug.get (← getOptions) && !(ranges.isEmpty && origin.isNone) then
       logError m!"residual obligation:\n{(← Lean.Meta.ppGoal goal)}"
     return reported
@@ -115,6 +151,46 @@ private def signedValue? (e : Lean.Expr) : Option (Lean.Expr × Lean.Expr) :=
     some ((e.getArg! 0).getArg! 0, e.getArg! 2)
   else none
 
+/-- A proof that an integer term is nonnegative, from its structure: a
+certified unsigned value, a nonnegative literal, and sums, products,
+shifts, conjunctions, and remainders of nonnegative terms. -/
+private partial def nonnegative? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  if let some (_, value) := unsignedValue? e then
+    return some (← mkAppM ``And.left #[← mkAppM ``LeanerIR.SpecInt.unsigned_bounds #[value]])
+  if let some literal := e.int? <|> (e.nat?.map Int.ofNat) then
+    if 0 ≤ literal then
+      return some (← mkDecideProof (← mkAppM ``LE.le #[mkIntLit 0, e]))
+    return none
+  let both (lemma : Name) : MetaM (Option Lean.Expr) := do
+    match ← nonnegative? (e.getArg! 4), ← nonnegative? (e.getArg! 5) with
+    | some left, some right => some <$> mkAppM lemma #[left, right]
+    | _, _ => pure none
+  if e.isAppOfArity ``HAdd.hAdd 6 then return ← both ``Int.add_nonneg
+  if e.isAppOfArity ``HMul.hMul 6 then return ← both ``Int.mul_nonneg
+  if e.isAppOfArity ``Int.shiftLeft 2 then
+    let some value ← nonnegative? (e.getArg! 0) | return none
+    return some (← mkAppM ``LeanerIR.Proofs.Denote.shiftLeft_nonneg #[e.getArg! 0, e.getArg! 1, value])
+  if e.isAppOfArity ``LeanerIR.Proofs.IntegerArithmetic.bitwiseAnd 2 then
+    let some left ← nonnegative? (e.getArg! 0) | return none
+    let some right ← nonnegative? (e.getArg! 1) | return none
+    return some (← mkAppM ``LeanerIR.Proofs.IntegerArithmetic.bitwiseAnd_nonneg #[left, right])
+  if e.isAppOfArity ``Int.tmod 2 then
+    let some value ← nonnegative? (e.getArg! 0) | return none
+    return some (← mkAppM ``Int.tmod_nonneg #[e.getArg! 1, value])
+  if e.isAppOfArity ``HMod.hMod 6 then
+    let modulus := e.getArg! 5
+    let some literal := modulus.int? <|> (modulus.nat?.map Int.ofNat) | return none
+    unless literal != 0 do return none
+    let nonzero ← mkDecideProof (← mkAppM ``Ne #[modulus, mkIntLit 0])
+    return some (← mkAppM ``Int.emod_nonneg #[e.getArg! 4, nonzero])
+  return none
+
+/-- Both facts, either, or none. -/
+private def conjoin? : Option Lean.Expr → Option Lean.Expr → MetaM (Option Lean.Expr)
+  | some left, some right => some <$> mkAppM ``And.intro #[left, right]
+  | some fact, none | none, some fact => pure (some fact)
+  | none, none => pure none
+
 /-- The bound of one bit operation, when its operands are certified. -/
 private def operationFact? (sub : Lean.Expr) : MetaM (Option Lean.Expr) := do
   if sub.hasLooseBVars then return none
@@ -123,24 +199,32 @@ private def operationFact? (sub : Lean.Expr) : MetaM (Option Lean.Expr) := do
     | some (_, left), some (_, right) =>
         return some (← mkAppM ``LeanerIR.Proofs.Denote.BitOp.eval_bounds
           #[mkConst ``LeanerIR.Proofs.Denote.BitOp.and, left, right])
-    | _, _ => return none
+    | _, _ =>
+        match ← nonnegative? (sub.getArg! 0), ← nonnegative? (sub.getArg! 1) with
+        | some left, some right =>
+            return some (← mkAppM ``LeanerIR.Proofs.IntegerArithmetic.bitwiseAnd_nonneg
+              #[left, right])
+        | _, _ => return none
+  -- A shift by a literal distance is a multiplication or division by a
+  -- literal, which `omega` reads.
+  let literalDistance := (sub.getArg! 1).nat?.isSome || (sub.getArg! 1).rawNatLit?.isSome
   if sub.isAppOfArity ``Int.shiftRight 2 then
-    match unsignedValue? (sub.getArg! 0) with
-    | some (_, value) =>
-        return some (← mkAppM ``LeanerIR.Proofs.Denote.shiftRight_bounds #[value, sub.getArg! 1])
-    | none => return none
+    let division ← if literalDistance then
+        some <$> mkAppM ``LeanerIR.Proofs.Denote.shiftRight_eq_div #[sub.getArg! 0, sub.getArg! 1]
+      else pure none
+    let bounds ← match unsignedValue? (sub.getArg! 0) with
+      | some (_, value) =>
+          some <$> mkAppM ``LeanerIR.Proofs.Denote.shiftRight_bounds #[value, sub.getArg! 1]
+      | none => pure none
+    return ← conjoin? bounds division
   if sub.isAppOfArity ``HMul.hMul 6 && (sub.getArg! 0).isConstOf ``Int then
     match unsignedValue? (sub.getArg! 4), unsignedValue? (sub.getArg! 5) with
     | some (_, left), some (_, right) =>
-        let leftNonnegative ← mkAppM ``And.left #[← mkAppM ``LeanerIR.SpecInt.unsigned_bounds #[left]]
-        let rightNonnegative ← mkAppM ``And.left #[← mkAppM ``LeanerIR.SpecInt.unsigned_bounds #[right]]
-        return some (← mkAppM ``Int.mul_nonneg #[leftNonnegative, rightNonnegative])
+        return some (← mkAppM ``LeanerIR.Proofs.Denote.mul_unsigned_bounds #[left, right])
     | _, _ => return none
   if sub.isAppOfArity ``Int.tdiv 2 || sub.isAppOfArity ``Int.tmod 2 then
-    match unsignedValue? (sub.getArg! 0), unsignedValue? (sub.getArg! 1) with
-    | some (_, left), some (_, right) =>
-        let leftNonnegative ← mkAppM ``And.left #[← mkAppM ``LeanerIR.SpecInt.unsigned_bounds #[left]]
-        let rightNonnegative ← mkAppM ``And.left #[← mkAppM ``LeanerIR.SpecInt.unsigned_bounds #[right]]
+    match ← nonnegative? (sub.getArg! 0), ← nonnegative? (sub.getArg! 1) with
+    | some leftNonnegative, some rightNonnegative =>
         let lemma := if sub.isAppOfArity ``Int.tdiv 2
           then ``LeanerIR.Proofs.Denote.tdiv_bounds_of_nonneg
           else ``LeanerIR.Proofs.Denote.tmod_bounds_of_nonneg
@@ -158,13 +242,11 @@ private def operationFact? (sub : Lean.Expr) : MetaM (Option Lean.Expr) := do
               else ``LeanerIR.Proofs.Denote.tmod_facts
             return some (mkApp2 (mkConst lemma) (sub.getArg! 0) (sub.getArg! 1))
   if sub.isAppOfArity ``Int.shiftLeft 2 then
-    match unsignedValue? (sub.getArg! 0) with
-    | some (_, value) =>
-        let bounds ← mkAppM ``LeanerIR.SpecInt.unsigned_bounds #[value]
-        let nonnegative ← mkAppM ``And.left #[bounds]
-        return some (← mkAppM ``LeanerIR.Proofs.Denote.shiftLeft_nonneg
-          #[sub.getArg! 0, sub.getArg! 1, nonnegative])
-    | none => return none
+    let product ← if literalDistance then
+        some <$> mkAppM ``LeanerIR.Proofs.Denote.shiftLeft_eq_mul #[sub.getArg! 0, sub.getArg! 1]
+      else pure none
+    let nonnegative ← nonnegative? sub
+    return ← conjoin? nonnegative product
   return none
 
 /-- The bit operations a proposition mentions. -/
@@ -263,7 +345,7 @@ elab "leaner_denote_bounds" : tactic => do
       let ty ← instantiateMVars decl.type
       -- An encoding equated to a runtime value names the native value it
       -- decodes to, and one distinguished from it excludes that value.
-      let equation := if ty.isAppOfArity ``LeanerIR.Proofs.Obligation 3 then ty.getArg! 2 else ty
+      let equation := if ty.isAppOfArity ``LeanerIR.Proofs.Obligation 4 then ty.getArg! 3 else ty
       if equation.isAppOfArity ``Not 1 && (equation.getArg! 0).isAppOfArity ``Eq 3 then
         let inner := equation.getArg! 0
         let lhs := inner.getArg! 1
@@ -283,9 +365,9 @@ elab "leaner_denote_bounds" : tactic => do
           else pure none
         if let some fact := fact then facts := facts.push fact
       if equation.isAppOfArity ``Eq 3 then
-        let proof ← if ty.isAppOfArity ``LeanerIR.Proofs.Obligation 3 then
+        let proof ← if ty.isAppOfArity ``LeanerIR.Proofs.Obligation 4 then
             mkAppM ``Iff.mp #[← mkAppOptM ``LeanerIR.Proofs.Obligation_iff
-              #[ty.getArg! 0, ty.getArg! 1, equation], decl.toExpr]
+              #[ty.getArg! 0, ty.getArg! 1, ty.getArg! 2, equation], decl.toExpr]
           else pure decl.toExpr
         let lhs := equation.getArg! 1
         let rhs := equation.getArg! 2
@@ -362,6 +444,40 @@ elab "leaner_denote_bounds" : tactic => do
     evalTactic (← `(tactic| try dsimp only at $name:ident))
     goal ← getMainGoal
   replaceMainGoal [goal]
+/-- A structure projection applied to a constructor application, reduced. -/
+private def reduceProjection? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
+  let .const name _ := e.getAppFn | return none
+  let some info ← getProjectionFnInfo? name | return none
+  let arguments := e.getAppArgs
+  let some value := arguments[info.numParams]? | return none
+  let .const constructor _ := value.getAppFn | return none
+  unless constructor == info.ctorName do return none
+  let some field := value.getAppArgs[info.numParams + info.i]? | return none
+  return some (mkAppN field (arguments.extract (info.numParams + 1) arguments.size))
+
+/-- Reduce every projection of a constructor application, in the goal and in
+every hypothesis. A substituted value leaves `{ val := e, … }.val` behind,
+which arithmetic cannot see through; the reduction is a definitional change,
+so it reaches the hypotheses other terms depend on, which `simp at *`
+leaves alone. -/
+elab "leaner_denote_reduce_projections" : tactic => do
+  let mut goal ← getMainGoal
+  let reduce (e : Lean.Expr) : MetaM Lean.Expr :=
+    Meta.transform e (post := fun e => do
+      match ← reduceProjection? e with
+      | some reduced => return .visit reduced
+      | none => return .continue)
+  for decl in ← goal.withContext getLCtx do
+    if decl.isImplementationDetail || decl.isLet then continue
+    let type ← goal.withContext (instantiateMVars decl.type)
+    let reduced ← goal.withContext (reduce type)
+    if reduced != type then
+      goal ← goal.replaceLocalDeclDefEq decl.fvarId reduced
+  let target ← goal.withContext (instantiateMVars (← goal.getType))
+  let reduced ← goal.withContext (reduce target)
+  if reduced != target then goal ← goal.replaceTargetDefEq reduced
+  replaceMainGoal [goal]
+
 /-- Clear every hypothesis that speaks about computations rather than
 values: the loop hypotheses and recursive iterations a leaf never needs. -/
 elab "leaner_denote_clear_computations" : tactic => do
@@ -671,6 +787,101 @@ private partial def detachProofs (goal : MVarId) (equation : FVarId) (x : FVarId
     -- The proofs the detached ones exposed, until the local is gone.
     if value.containsFVar x then detachProofs goal equation x else return some goal
 
+/-- Whether a runtime value is a constructor that fixes its variant: a
+nominal value's variant is a literal. -/
+private def fixesVariant (value : Lean.Expr) : Bool :=
+  match value.getAppFn.constName? with
+  | some ``LeanerIR.RuntimeValue.nominal =>
+      value.getAppNumArgs == 3 && match (value.getArg! 1).consumeMData with
+        | .app (.app (.const ``Option.some _) _) (.lit (.strVal _)) => true
+        | .app (.const ``Option.none _) _ => true
+        | _ => false
+  | some name => name.getPrefix == ``LeanerIR.RuntimeValue
+  | none => false
+
+/-- A hypothesis fixing the encoding of a local, `encode τ x = e` with `x`
+not in `e` and `e` a constructor fixing its variant, that `rewritten` does
+not list. -/
+private def encodingEquation? (goal : MVarId) (rewritten : Array FVarId) :
+    MetaM (Option FVarId) := goal.withContext do
+  (← getLCtx).findDeclM? fun decl => do
+    if decl.isImplementationDetail || rewritten.contains decl.fvarId then return none
+    let ty ← instantiateMVars decl.type
+    unless ty.isAppOfArity ``Eq 3 do return none
+    let encodes (side other : Lean.Expr) : Bool :=
+      side.isAppOfArity ``NTy.encode 3 && fixesVariant other && match side.appArg! with
+        | .fvar x => !other.containsFVar x
+        | _ => false
+    if encodes (ty.getArg! 1) (ty.getArg! 2) || encodes (ty.getArg! 2) (ty.getArg! 1) then
+      return some decl.fvarId
+    return none
+
+/-- Rewrite the target and the other hypotheses by an equation fixing a
+local's encoding, each where the rewrite is well typed. -/
+private def rewriteByEncoding (goal : MVarId) (equation : FVarId) : MetaM MVarId :=
+  goal.withContext do
+    let type ← instantiateMVars (← equation.getType)
+    let symm := !(type.getArg! 1).isAppOfArity ``NTy.encode 3
+    let mut goal := goal
+    for decl in ← getLCtx do
+      if decl.isImplementationDetail || decl.fvarId == equation then continue
+      let rewritten ← observing? do
+        let result ← goal.rewrite decl.type (Lean.mkFVar equation) symm
+        unless result.mvarIds.isEmpty do failure
+        pure result
+      if let some result := rewritten then
+        goal := (← goal.replaceLocalDecl decl.fvarId result.eNew result.eqProof).mvarId
+    let rewritten ← observing? do
+      let result ← goal.rewrite (← goal.getType) (Lean.mkFVar equation) symm
+      unless result.mvarIds.isEmpty do failure
+      pure result
+    if let some result := rewritten then
+      goal ← goal.replaceTargetEq result.eNew result.eqProof
+    return goal
+
+/-- Close a goal by a case hypothesis `∀ xs, a = b → … → False` that an
+instance refutes: the fall-through case of a match whose discriminant is
+known to be a pattern's constructor, as a split states it or as the
+normalizer leaves it, its equation taken apart. -/
+private def refuteFallthrough (goal : MVarId) : MetaM Bool := goal.withContext do
+  for decl in ← getLCtx do
+    if decl.isImplementationDetail then continue
+    let type ← instantiateMVars decl.type
+    unless type.isForall do continue
+    let refuted ← observing? do
+      let (arguments, _, body) ← forallMetaTelescopeReducing type
+      unless body.isConstOf ``False do failure
+      let mut equations := 0
+      for argument in arguments do
+        let argumentType ← instantiateMVars (← inferType argument)
+        let_expr Eq _ left right := argumentType | continue
+        unless ← isDefEq left right do failure
+        argument.mvarId!.assign (← mkEqRefl left)
+        equations := equations + 1
+      if equations == 0 then failure
+      let proof ← instantiateMVars (mkAppN decl.toExpr arguments)
+      if proof.hasExprMVar then failure
+      goal.assign (← mkFalseElim (← goal.getType) proof)
+    if refuted.isSome then return true
+  return false
+
+/-- Destructure a local along its native carrier: a variant sum into its
+alternatives, a row into its fields, until the parts are scalars or
+parameters. -/
+private partial def destructureCarrier (goal : MVarId) (value : FVarId) :
+    MetaM (Array MVarId) := goal.withContext do
+  let type ← whnfD (← instantiateMVars (← value.getType))
+  unless type.isAppOf ``Sum || type.isAppOf ``Prod || type.isAppOf ``PUnit ||
+      type.isAppOf ``Empty do
+    return #[goal]
+  let cases ← goal.cases value
+  cases.foldlM (init := #[]) fun found case => do
+    let mut goals := #[case.mvarId]
+    for field in case.fields do
+      let .fvar part := field | continue
+      goals ← goals.flatMapM fun goal => destructureCarrier goal part
+    return found ++ goals
+
 /-- Substitute every hypothesis equating a local variable to a term, by
 syntactic shape alone: no hypothesis is unfolded to find one. -/
 elab "leaner_denote_subst_vars" : tactic => do
@@ -678,6 +889,7 @@ elab "leaner_denote_subst_vars" : tactic => do
   let mut goal ← getMainGoal
   let mut progress := true
   let mut attempted : Array FVarId := #[]
+  let mut encoded : Array FVarId := #[]
   while progress do
     progress := false
     let equation ← goal.withContext do
@@ -707,8 +919,29 @@ elab "leaner_denote_subst_vars" : tactic => do
         if let some detached ← detachProofs goal fvarId x then
           goal := detached
         progress := true
-    | none => pure ()
-  replaceMainGoal [goal]
+    | none =>
+        -- A local whose encoding is fixed, such as a generic callee's
+        -- result, is known wherever that encoding occurs.
+        if let some fvarId ← encodingEquation? goal encoded then
+          encoded := encoded.push fvarId
+          goal ← rewriteByEncoding goal fvarId
+          progress := true
+  -- A match's fall-through case whose discriminant the substitutions have
+  -- fixed to a constructor is refuted.
+  if ← refuteFallthrough goal then replaceMainGoal []; return
+  -- A local's own structure follows from its encoding once it is
+  -- destructured; the alternatives an equation excludes compute to
+  -- contradictions.
+  let mut goals := #[goal]
+  for equation in encoded do
+    goals ← goals.flatMapM fun goal => goal.withContext do
+      let some decl := (← getLCtx).find? equation | return #[goal]
+      let type ← instantiateMVars decl.type
+      let side := if (type.getArg! 1).isAppOfArity ``NTy.encode 3 then type.getArg! 1
+        else type.getArg! 2
+      let .fvar encodedLocal := side.appArg! | return #[goal]
+      destructureCarrier goal encodedLocal
+  replaceMainGoal goals.toList
 
 /-- Split a leaf goal into its cases: a conjunction into its parts, and a
 binder, implication, or negation into a hypothesis, until the goal is
@@ -741,13 +974,24 @@ macro "leaner_denote_saturate_round" : tactic => `(tactic| (
   all_goals leaner_denote_subst_vars
   all_goals (try leaner_simp_all [lir_denote_norm])))
 
+/-- What a saturation round can change of a goal: its target and its
+hypotheses. -/
+private def goalContent (goal : MVarId) : MetaM (Array Lean.Expr) := goal.withContext do
+  let mut content := #[← instantiateMVars (← goal.getType)]
+  for decl in ← getLCtx do
+    unless decl.isImplementationDetail do
+      content := content.push (← instantiateMVars decl.type)
+  return content
+
 /-- Saturate a leaf's context: rounds of rewriting while new hypotheses
-appear, after the round the leaf has already run. -/
-macro "leaner_denote_saturate" : tactic => `(tactic| (
-  leaner_denote_saturate_round
-  leaner_denote_saturate_round
-  leaner_denote_saturate_round
-  leaner_denote_saturate_round))
+appear, after the round the leaf has already run, at most four. A round
+that leaves the goals as they were has reached the fixed point, and a
+further round would repeat it. -/
+elab "leaner_denote_saturate" : tactic => do
+  for _ in [0:4] do
+    let before ← (← getGoals).mapM fun goal => goalContent goal
+    evalTactic (← `(tactic| leaner_denote_saturate_round))
+    if (← (← getGoals).mapM fun goal => goalContent goal) == before then return
 
 /-- `decide` on a closed goal only: on an open one the kernel evaluates
 the instance for as long as the goal is large, then fails anyway. -/
@@ -788,6 +1032,7 @@ macro "leaner_denote_prepare" : tactic => `(tactic| (
   leaner_denote_clear_computations
   leaner_denote_split_hypotheses
   leaner_denote_subst_vars
+  leaner_denote_reduce_projections
   leaner_denote_bounds
   -- A conditional whose condition omega decides, such as a vector's bound
   -- after an update, takes its branch; a condition a hypothesis states is
@@ -799,16 +1044,34 @@ macro "leaner_denote_prepare" : tactic => `(tactic| (
     Prod.snd] at *
   all_goals leaner_denote_split_hypotheses
   all_goals leaner_denote_subst_vars
+  all_goals leaner_denote_reduce_projections
   -- Lookups of one position, once substitution has exposed them.
   all_goals leaner_denote_merge_lookups
   all_goals leaner_denote_split_hypotheses
   all_goals leaner_denote_subst_vars
   all_goals (try simp only [Prod.fst, Prod.snd] at *)))
 
+/-- Split the goal's first conditional or match. A match's fall-through
+case that its computed discriminant refutes is closed at once. -/
+elab "leaner_denote_split" : tactic => do
+  -- A discriminant a hypothesis equates to a term is split as that term.
+  let original ← getMainGoal
+  evalTactic (← `(tactic| leaner_denote_subst_vars))
+  -- A refuted or destructured goal is progress enough.
+  if (← getGoals).length != 1 then return
+  -- The context stays normalized for the deciders that rewrite with it.
+  if (← getMainGoal) != original then
+    evalTactic (← `(tactic| try simp only [lir_denote, lir_denote_norm, lir_denote_eval,
+      Prod.fst, Prod.snd] at *))
+  evalTactic (← `(tactic| split))
+  let goals ← (← getGoals).filterM fun goal => do return !(← refuteFallthrough goal)
+  setGoals goals
+
 /-- The general leaf: one pipeline, each stage over the previous stage's
 goals, so that a rewriting pass is never repeated for a later alternative. -/
 macro "leaner_denote_pipeline" : tactic => `(tactic| (
   leaner_denote_subst_vars
+  leaner_denote_reduce_projections
   leaner_denote_bounds
   try simp (disch := omega) only [LeanerIR.Proofs.Obligation_iff, Nat.reduceAdd,
     Int.reducePow, Int.reduceSub, Nat.reducePow, Nat.reduceSub, Int.tmod_eq_emod_of_nonneg,
@@ -821,11 +1084,11 @@ macro "leaner_denote_pipeline" : tactic => `(tactic| (
        | done
        | (leaner_denote_bounds; omega)
        | (leaner_denote_saturate
-          all_goals (try (split <;> (try leaner_simp_all [lir_denote_norm])))
-          all_goals (try (split <;> (try leaner_simp_all [lir_denote_norm])))
+          all_goals (try (leaner_denote_split <;> (try leaner_simp_all [lir_denote_norm])))
+          all_goals (try (leaner_denote_split <;> (try leaner_simp_all [lir_denote_norm])))
           all_goals leaner_denote_split_goal
           leaner_denote_saturate_round
-          all_goals (leaner_denote_bounds; omega))))))
+          all_goals (first | (leaner_denote_bounds; omega) | leaner_denote_bv))))))
 
 /-- An existential goal whose body some hypothesis states at a witness. -/
 elab "leaner_denote_witness" : tactic => do
@@ -858,8 +1121,38 @@ macro "leaner_denote_decide_cheap" : tactic => `(tactic|
      | (leaner_denote_bounds; omega)
      | leaner_denote_decide))
 
+/-- A goal some hypothesis states, up to reducible unfolding. Plain
+`assumption` compares at default transparency, which unfolds large
+verification conditions at length before failing on the leaves nothing
+closes. -/
+elab "leaner_denote_assumption" : tactic => do
+  let goal ← getMainGoal
+  goal.withContext do
+    let target ← instantiateMVars (← goal.getType)
+    for decl in ← getLCtx do
+      if decl.isImplementationDetail then continue
+      if ← withReducible (isDefEq target (← instantiateMVars decl.type)) then
+        goal.assign decl.toExpr
+        replaceMainGoal []
+        return
+    throwError "no hypothesis states the goal"
+
+/-- `trivial` at reducible transparency and without `decide` and
+`contradiction`: an open goal's decision and a search for contradicting
+hypotheses belong to the deciders, which bound them. -/
+syntax "leaner_denote_trivial" : tactic
+
+macro_rules
+  | `(tactic| leaner_denote_trivial) => `(tactic|
+      first
+      | leaner_denote_assumption
+      | with_reducible rfl
+      | exact True.intro
+      | (apply And.intro <;> leaner_denote_trivial))
+
 /-- A goal that is an instance of a quantified hypothesis: the hypothesis
-applied, its premises closed by omega or by assumption. -/
+applied at reducible transparency, its premises closed by omega or by a
+hypothesis. -/
 elab "leaner_denote_instance" : tactic => do
   let initial ← saveState
   let (_, goal) ← (← getMainGoal).intros
@@ -871,14 +1164,33 @@ elab "leaner_denote_instance" : tactic => do
   for candidate in candidates.reverse do
     let saved ← saveState
     try
-      let premises ← goal.apply candidate
+      let premises ← withReducible (goal.apply candidate)
       setGoals premises
-      evalTactic (← `(tactic| all_goals first | assumption | omega))
+      evalTactic (← `(tactic| all_goals first | leaner_denote_assumption | omega))
       if (← getGoals).isEmpty then return
     catch _ => pure ()
     saved.restore
   initial.restore
   throwError "no quantified hypothesis has the goal as an instance"
+
+/-- The goal in normal form rewritten by the hypotheses, but for the
+equations that would rewrite a term into one containing it. -/
+elab "leaner_denote_simp_by_context" : tactic => withMainContext do
+  let stx ← `(tactic| simp only [LeanerIR.Proofs.Obligation_iff, Nat.reduceAdd, Int.reducePow,
+    Int.reduceSub, Nat.reducePow, Nat.reduceSub, lir_denote_norm])
+  let { ctx, simprocs, .. } ← mkSimpContext stx (eraseLocal := false)
+  let mut hypotheses : SimpTheorems := {}
+  for decl in ← getLCtx do
+    if decl.isImplementationDetail then continue
+    let type ← instantiateMVars decl.type
+    unless ← isProp type do continue
+    if ← selfReferential type then continue
+    hypotheses ← hypotheses.add (.fvar decl.fvarId) #[] decl.toExpr
+  let ctx ← Simp.mkContext ctx.config (ctx.simpTheorems.push hypotheses)
+    (withoutBranchConditions ctx.congrTheorems)
+  match ← simpGoal (← getMainGoal) ctx simprocs (simplifyTarget := true) (fvarIdsToSimp := #[]) with
+  | (none, _) => replaceMainGoal []
+  | (some (_, goal), _) => replaceMainGoal [goal]
 
 /-- The deciders of a leaf an authored proof may take over: the cheap ones,
 and the goal alone in normal form rewritten by the hypotheses, which is
@@ -890,16 +1202,15 @@ macro "leaner_denote_decide_residual" : tactic => `(tactic|
   | omega
   | leaner_denote_decide_cheap
   | leaner_denote_instance
-  | (simp only [LeanerIR.Proofs.Obligation_iff, Nat.reduceAdd, Int.reducePow, Int.reduceSub,
-      Nat.reducePow, Nat.reduceSub, lir_denote_norm, *]
+  | (leaner_denote_simp_by_context
      first | done | (leaner_denote_bounds; omega))
-  | trivial)
+  | leaner_denote_trivial)
 
 /-- Decide one leaf cheaply, without rewriting its context. -/
 macro "leaner_denote_leaf_cheap" : tactic => `(tactic|
   (leaner_denote_clear_computations
    first
-   | assumption
+   | leaner_denote_assumption
    | (leaner_denote_split_hypotheses
       leaner_denote_decide_residual)))
 
@@ -911,14 +1222,14 @@ macro_rules
       (leaner_denote_clear_computations
        first
        -- A goal a hypothesis states, before splitting takes it apart.
-       | assumption
+       | leaner_denote_assumption
        -- Atomic hypotheses first: each is rewritten, used, and dropped on
        -- its own.
        | (leaner_denote_split_hypotheses
           first
           | leaner_denote_decide_cheap
           | leaner_denote_pipeline
-          | trivial)))
+          | leaner_denote_trivial)))
 
 /-- A structural update of an array literal at literal positions: the
 positions move, the elements are not inspected. -/
@@ -966,6 +1277,31 @@ dsimproc [lir_denote_norm] reduceReverseRange (LeanerIR.Proofs.Denote.reverseRan
         left := left + 1
         right := right - 1
       return some elements
+
+/-- Normalize only a bind's action. Its continuation is the rest of the
+program: the closer reaches it through a folded continuation when the action
+completes, so the normalizer never traverses it while a head is processed.
+An action that completed hands the bind back to the rewrite rules that
+reduce it. -/
+private def bindActionStep (e : Lean.Expr) : Simp.SimpM Simp.Step := do
+  let arguments := e.getAppArgs
+  if arguments.size < 2 then return .continue
+  let action := arguments[arguments.size - 2]!
+  let next := arguments[arguments.size - 1]!
+  let result ← Simp.simp action
+  let head := mkAppN e.getAppFn (arguments.extract 0 (arguments.size - 2))
+  let expr := mkApp2 head result.expr next
+  let proof? ← result.proof?.mapM fun proof => do mkCongrFun (← mkCongrArg head proof) next
+  let completed := match result.expr.getAppFn with
+    | .const name _ => name == ``LeanerIR.Proofs.Spec.pure || name == ``LeanerIR.Proofs.Spec.abort
+    | _ => false
+  if completed then return .continue (some { expr, proof? })
+  return .done { expr, proof? }
+
+simproc ↓ [lir_denote_norm] bindAction (LeanerIR.Proofs.Spec.bind _ _) := bindActionStep
+
+simproc ↓ [lir_denote_norm] flowBindAction (@LeanerIR.Proofs.Denote.Flow.bind ?skolems _ _ _ _ _ _) :=
+  bindActionStep
 
 /-- A type argument of a literal row: the substitution evaluates. -/
 dsimproc ↓ [lir_denote_norm] reduceParameterSubst (LeanerIR.Proofs.Denote.NTy.subst _ _) :=
@@ -1049,9 +1385,8 @@ attribute [lir_denote_norm] LeanerIR.Proofs.Denote.NTy.codec_param
 -- A function calling itself, or a member of a cycle of calls: the calls
 -- routed to the cycle are `self`, every other call its callee's meaning.
 attribute [lir_denote_norm] LeanerIR.Proofs.Denote.routeMeaning_self
-  LeanerIR.Proofs.Denote.routeMeaning_other LeanerIR.Proofs.Denote.recursiveMeaning_self
-  LeanerIR.Proofs.Denote.recursiveGeneric_self LeanerIR.Proofs.Denote.recursiveGeneric_other
-  LeanerIR.Proofs.Denote.recursiveMeaning_other LeanerIR.FunctionHandle.mk.injEq
+  LeanerIR.Proofs.Denote.routeMeaning_other LeanerIR.Proofs.Denote.routeGeneric_self
+  LeanerIR.Proofs.Denote.routeGeneric_other LeanerIR.FunctionHandle.mk.injEq
   LeanerIR.NamespaceId.mk.injEq LeanerIR.FunctionId.mk.injEq
 -- The structural order, as the ordering it computes.
 attribute [lir_denote_norm] LeanerIR.Proofs.Denote.compareResult_val LeanerIR.orderValue_lt_zero
@@ -1068,12 +1403,17 @@ attribute [lir_denote_norm] Option.dite_none_right_eq_some
   Array.size_insertIdx Array.size_eraseIdx
 attribute [lir_denote_norm] LeanerIR.Proofs.Denote.findIndex?_eq_none_iff
   LeanerIR.Proofs.Denote.findIndex?_isSome_iff
+-- Bitwise conjunction commutes; simp orders its operands.
+attribute [lir_denote_norm] LeanerIR.Proofs.IntegerArithmetic.bitwiseAnd_comm
+-- A wrapping shift whose value cannot reach the modulus.
+attribute [lir_denote_norm] LeanerIR.Proofs.Denote.shiftLeft_emod_of_fits
+  LeanerIR.Proofs.Denote.shiftLeft_tmod_of_fits
 -- A resolved prophecy brings an operation's result into a leaf.
 attribute [lir_denote_norm] LeanerIR.Proofs.Denote.wrapInt_unsigned
   LeanerIR.Proofs.Denote.wrapInt_signed LeanerIR.Proofs.Denote.ModularOp.run_val
   LeanerIR.Proofs.Denote.BitOp.run_val
-attribute [lir_denote_norm] LeanerIR.Proofs.wp_bind LeanerIR.Proofs.wp_pure
-  LeanerIR.Proofs.wp_abort LeanerIR.Proofs.Spec.pure_bind
+attribute [lir_denote_norm] LeanerIR.Proofs.wp_pure
+  LeanerIR.Proofs.wp_abort LeanerIR.Proofs.Spec.pure_bind LeanerIR.Proofs.Spec.abort_bind
   LeanerIR.Proofs.Denote.ResultShape.bodyType Bool.not_eq_true decide_eq_true_eq Bool.and_eq_true
   Bool.or_eq_true and_assoc exists_and_left exists_and_right exists_eq_left exists_eq_left'
   and_true true_and and_imp forall_and forall_eq forall_eq' Prod.mk.injEq exists_eq exists_eq'
@@ -1154,21 +1494,23 @@ private def loopGoal? (goal : MVarId) : MetaM (Option (Nat × Array Lean.Expr)) 
     return some (site, action.getAppArgs ++ #[target.getArg! 4, target.getArg! 5, target.getArg! 6])
 
 /-- One structural split of a goal, on its syntax alone: a binder, a
-conjunction, or a conditional.  Nothing is unfolded to find one. -/
-private def splitOnce (goal : MVarId) : TacticM (Option (List MVarId)) := do
+conjunction, or a conditional.  Nothing is unfolded to find one.  Only a
+conditional's branches can hold new redexes: a binder or conjunct of a
+normalized goal is normalized already. -/
+private def splitOnce (goal : MVarId) : TacticM (Option (List MVarId × Bool)) := do
   let target ← goal.withContext (instantiateMVars (← goal.getType))
   if target.isForall then
     -- A quantified variable keeps its name, for an authored proof.
     let (_, next) ← goal.intro1P
-    return some [next]
+    return some ([next], false)
   if target.isAppOfArity ``And 2 then
     let subgoals ← goal.apply (mkConst ``And.intro)
-    return some subgoals
+    return some (subgoals, false)
   let saved ← saveState
   try
     setGoals [goal]
-    evalTactic (← `(tactic| split))
-    return some (← getGoals)
+    evalTactic (← `(tactic| leaner_denote_split))
+    return some (← getGoals, true)
   catch _ =>
     saved.restore
     return none
@@ -1226,10 +1568,73 @@ private def contractConstants (theoremType : Lean.Expr) : MetaM (Array Name) := 
           if name.getPrefix.isPrefixOf dependency then names := names.push dependency
   return names
 
+/-- The name of a continuation — a loop's, or a bind's — bound as a local
+definition while the action before it is traversed. Substitutions
+re-introduce locals, so the closer recognizes it by name rather than by
+identity. -/
+def continuationName : Name := `leanerContinuation
+
+/-- Whether an action can branch, so that its continuation would be reached
+on several paths. -/
+private def mayBranch (action : Lean.Expr) : MetaM Bool := do
+  let env ← getEnv
+  return (action.find? fun sub => match sub.getAppFn with
+    | .const name _ =>
+        name == ``ite || name == ``dite || name == ``LeanerIR.Proofs.Denote.loopAt ||
+          Lean.Meta.isMatcherCore env name
+    | _ => false).isSome
+
+/-- A bind at the head of a goal, taken by its rule: the goal with the
+action at the head, and whether the action can branch. -/
+private def bindRule? (goal : MVarId) : MetaM (Option (MVarId × Bool)) := goal.withContext do
+  let target ← instantiateMVars (← goal.getType)
+  unless target.isAppOfArity ``LeanerIR.Proofs.wp 7 do return none
+  let action := (target.getArg! 3).consumeMData.headBeta
+  let conditions := #[target.getArg! 4, target.getArg! 5, target.getArg! 6]
+  let rule ← if action.isAppOfArity ``LeanerIR.Proofs.Spec.bind 6 then
+      mkAppM ``LeanerIR.Proofs.wp_bind (#[action.getArg! 4, action.getArg! 5] ++ conditions)
+    else if action.isAppOfArity ``LeanerIR.Proofs.Denote.Flow.bind 7 then
+      -- The flow's own skolem family and types instantiate the rule.
+      pure (mkAppN (mkConst ``LeanerIR.Proofs.Denote.wp_flowBind) (action.getAppArgs ++ conditions))
+    else return none
+  let [unfolded] ← goal.apply (← mkAppM ``Iff.mpr #[rule])
+    | throwError "the bind rule did not leave one goal"
+  return some (unfolded, ← mayBranch (action.getArg! (action.getAppNumArgs - 2)))
+
+/-- Bind a goal's continuation as a local definition, which the normalizer
+leaves folded until the action completes: a branching action reaches it on
+several paths, and no branch renormalizes it. -/
+private def foldContinuation (goal : MVarId) : MetaM MVarId := goal.withContext do
+  let target ← instantiateMVars (← goal.getType)
+  unless target.isAppOfArity ``LeanerIR.Proofs.wp 7 do return goal
+  let ensures := target.getArg! 4
+  if ensures.isFVar then return goal
+  let defined ← goal.define continuationName (← inferType ensures) ensures
+  let (continuation, folded) ← defined.intro1P
+  folded.withContext do
+    let target ← instantiateMVars (← folded.getType)
+    folded.replaceTargetDefEq
+      (mkAppN target.getAppFn (target.getAppArgs.set! 4 (mkFVar continuation)))
+
+/-- Strip the `Obligation` markers heading a goal, returning the goal and
+the clause ranges they carried, kept aside for reporting. A contract clause
+is decided whole under its marker; a loop invariant is established as the
+closer takes it apart, its quantifiers introduced by name for an authored
+proof and its existentials left to a witness, so an invariant goal's
+markers are set aside rather than sealing its clauses. -/
+private partial def stripObligations (goal : MVarId) (clauses : Array ObligationRange) :
+    MetaM (MVarId × Array ObligationRange) := goal.withContext do
+  let target ← instantiateMVars (← goal.getType)
+  unless target.isAppOfArity ``LeanerIR.Proofs.Obligation 4 do return (goal, clauses)
+  let clauses := match obligationRange? target with
+    | some range => clauses.push range
+    | none => clauses
+  stripObligations (← goal.replaceTargetDefEq (target.getArg! 3)) clauses
+
 /-- Close every goal: a loop by its invariant, a recursive-call leaf by the
 loop hypothesis, a call by the callee's theorem, a structural node by
 splitting, and a leaf by decision. -/
-partial def closeGoals (invariants : Array (Nat × Lean.Expr))
+partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
     (callees : Array (Lean.Expr × String × Lean.Expr)) (equations : Array Lean.Expr := #[])
     (residual : Bool := false) :
     TacticM Unit := do
@@ -1255,29 +1660,71 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
     if target.isMData then goal.replaceTargetDefEq target.consumeMData else pure goal)
   -- The function's arguments and state at its start, what a loop
   -- invariant's `old` reads, from the goal's own context.
-  let start? (goal : MVarId) : MetaM (Option (Lean.Expr × Lean.Expr)) := goal.withContext do
-    for declaration in ← getLCtx do
-      let type ← instantiateMVars declaration.type
-      if type.isAppOfArity ``FunctionStart 3 then
-        return some (type.getArg! 1, type.getArg! 2)
-    return none
+  -- A function's latest start on the path: an inlined callee's calls are
+  -- sequential, and a loop runs inside the call that reached it.
+  let start? (goal : MVarId) (function : Lean.Expr) : MetaM (Option (Lean.Expr × Lean.Expr)) :=
+    goal.withContext do
+      let mut found := none
+      for declaration in ← getLCtx do
+        let type ← instantiateMVars declaration.type
+        if type.isAppOfArity ``FunctionStart 4 then
+          if ← isDefEq (type.getArg! 1) function then
+            found := some (type.getArg! 2, type.getArg! 3)
+      return found
   let debug := leaner.denoteDebug.get (← getOptions)
   let startHeartbeats ← IO.getNumHeartbeats
   let mut leaves := 0
   let mut stageCost : Array (String × Nat) := #[]
-  let mut reported : Array (Nat × Nat) := #[]
-  let mut pending : Array (MVarId × Option Provenance) := (← getGoals).toArray.map fun g => (g, none)
-  while let some (goal, provenance) := pending.back? do
+  let mut reported : Array (ObligationRange × String) := #[]
+  let mut pending : Array (MVarId × Option Provenance × Array ObligationRange) :=
+    (← getGoals).toArray.map fun g => (g, none, #[])
+  while let some (goal, provenance, clauses) := pending.back? do
     pending := pending.pop
+    let (goal, clauses) ← match provenance with
+      | some .loopEntry | some .loopIteration => stripObligations goal clauses
+      | _ => pure (goal, clauses)
     if ← goal.isAssigned then continue
     setGoals [goal]
     let stageStart ← IO.getNumHeartbeats
+    -- An exit of a loop reaches its continuation, which is unfolded here, at
+    -- the one place the rest of the function is needed.
+    let exit? ← goal.withContext do
+      let target ← instantiateMVars (← goal.getType)
+      let .fvar id := target.getAppFn | pure none
+      let declaration ← id.getDecl
+      if declaration.isLet && declaration.userName == continuationName then
+        pure (some (← zetaDeltaFVars target #[id]).headBeta)
+      else pure none
+    if let some unfolded := exit? then
+      setGoals [← goal.replaceTargetDefEq unfolded]
+      evalTactic (← `(tactic| try leaner_denote_normalize))
+      if debug then
+        let head := match unfolded.getAppFn with
+          | .const name _ => toString name
+          | _ => "?"
+        let action := if unfolded.isAppOfArity ``LeanerIR.Proofs.wp 7 then
+            match (unfolded.getArg! 3).consumeMData.headBeta.getAppFn with
+            | .const name _ => s!" of {name}"
+            | _ => " of ?"
+          else ""
+        logInfo m!"exit into {head}{action}: {((← IO.getNumHeartbeats) - stageStart) / 1000}k"
+      pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance, clauses)
+      stageCost := stageCost.push ("exit", (← IO.getNumHeartbeats) - stageStart)
+      continue
+    if let some (unfolded, branches) ← bindRule? goal then
+      -- A straight-line action keeps its continuation in place: it reaches
+      -- it on one path.
+      setGoals [← if branches then foldContinuation unfolded else pure unfolded]
+      evalTactic (← `(tactic| try leaner_denote_normalize))
+      pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance, clauses)
+      stageCost := stageCost.push ("bind", (← IO.getNumHeartbeats) - stageStart)
+      continue
     if let some (site, arguments) ← loopGoal? goal then
-      let some (_, invariant) := invariants.find? (·.1 == site)
+      let some (_, function, invariant) := invariants.find? (·.1 == site)
         | throwError m!"no invariant for the loop at site {site}"
       -- Without a recorded start, the invariant does not read `old`, and
       -- its start arguments vanish on reduction.
-      let (start, startState) ← match ← start? goal with
+      let (start, startState) ← match ← start? goal function with
         | some start => pure start
         | none => goal.withContext do
             let type ← inferType invariant
@@ -1290,15 +1737,29 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
         (whnfR (mkAppN invariant #[start, startState, arguments[5]!, arguments[8]!]))
       if (← instantiateMVars invariant).hasExprMVar then
         throwError m!"the invariant at site {site} reads `old` without a recorded function start"
+      -- The loop's continuation is bound once, as a local definition the
+      -- normalizer does not unfold: the loop hypothesis and every back edge
+      -- carry it folded.
+      let ensures := arguments[6]!
+      let (continuation, goal) ← goal.withContext do
+        let target ← instantiateMVars (← goal.getType)
+        let defined ← goal.define continuationName (← inferType ensures) ensures
+        let (continuation, goal) ← defined.intro1P
+        let abstracted := target.replace fun e =>
+          if e == ensures then some (mkFVar continuation) else none
+        pure (continuation, ← goal.replaceTargetDefEq abstracted)
+      let arguments := arguments.set! 6 (mkFVar continuation)
       let rule := mkAppN (mkConst ``LeanerIR.Proofs.Denote.wp_loopAt)
         (arguments.extract 0 6 ++ #[invariant] ++ arguments.extract 6 9)
-      let subgoals ← goal.apply rule
+      let subgoals ← goal.withContext (goal.apply rule)
       match subgoals with
       | [entryHolds, step] =>
           let stepStart ← IO.getNumHeartbeats
           let mut marks : Array (String × Nat) := #[]
           setGoals [step]
           evalTactic (← `(tactic| intro recursive loopHypothesis env state loopInvariant))
+          -- Assumed, the invariant's clauses are facts rather than obligations.
+          evalTactic (← `(tactic| try simp only [LeanerIR.Proofs.Obligation_iff] at loopInvariant))
           evalTactic (← `(tactic| leaner_denote_normalize at loopHypothesis loopInvariant ⊢))
           marks := marks.push ("normalize 1", ← IO.getNumHeartbeats)
           -- The invariant's equations on the locals are substituted before
@@ -1323,10 +1784,10 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
               report := report ++ m!" {label} {(mark - previous) / 1000}k;"
               previous := mark
             logInfo m!"{report} {(← getGoals).length} goals"
-          pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance)
+          pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance, clauses)
           setGoals [entryHolds]
           evalTactic (← `(tactic| try leaner_denote_normalize))
-          pending := pending ++ (← getGoals).toArray.map fun g => (g, some .loopEntry)
+          pending := pending ++ (← getGoals).toArray.map fun g => (g, some .loopEntry, #[])
       | _ => throwError "the loop rule did not produce its two obligations"
       stageCost := stageCost.push ("loop", (← IO.getNumHeartbeats) - stageStart)
       continue
@@ -1370,19 +1831,31 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
             $instantiationSyntax $handleSyntax
             $compiledSyntax $proofSyntax $valuesSyntax $ensuresSyntax $abortsSyntax
             $initialSyntax).mpr ?_))
+        -- The inlined callee starts here: its loops' invariants read `old`
+        -- from its arguments at the call.
+        if ← invariants.anyM fun (_, function, _) => goal.withContext (isDefEq function handle) then
+          let inlined ← getMainGoal
+          let started ← inlined.withContext do
+            let proof ← mkAppM ``FunctionStart.intro
+              #[action.getArg! 3, action.getArg! 6, target.getArg! 6]
+            let (_, started) ← (← inlined.assert `leanerStart (← inferType proof) proof).intro1P
+            pure started
+          replaceMainGoal [started]
         evalTactic (← `(tactic| try simp only [$lemmas,*, LeanerIR.Proofs.Denote.Function.denote,
           LeanerIR.Proofs.Denote.NRow.nil_append, LeanerIR.Proofs.Denote.NRow.cons_append]))
         evalTactic (← `(tactic| try leaner_denote_normalize))
-        pending := pending ++ (← rewriteEquations (← getGoals)).toArray.map fun g => (g, provenance)
+        pending := pending ++
+          (← rewriteEquations (← getGoals)).toArray.map fun g => (g, provenance, clauses)
         continue
       evalTactic (← `(tactic| refine LeanerIR.Proofs.Denote.wp_call $proofSyntax ?_ ?_ ?_))
       let subgoals ← getGoals
-      -- A callee's theorem assumes the natives it reaches; the caller
-      -- assumes them too.
+      -- A callee's theorem assumes the natives it reaches, a generic one's
+      -- at every family and instantiation; the caller assumes them too.
       for argument in theoremArguments do
         if let .mvar id ← instantiateMVars argument then
-          if (← instantiateMVars (← id.getType)).isAppOf ``LeanerIR.Proofs.Satisfies then
-            id.assumption
+          let native ← forallTelescope (← instantiateMVars (← id.getType)) fun _ body =>
+            pure (body.isAppOf ``LeanerIR.Proofs.Satisfies)
+          if native then id.assumption
       let constants ← goal.withContext (contractConstants (← inferType theoremProof))
       let lemmas : Array (TSyntax ``Lean.Parser.Tactic.simpLemma) ← constants.mapM fun name => do
         let ident := mkIdent (rootNamespace ++ name)
@@ -1393,25 +1866,43 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
         evalTactic (← `(tactic| try leaner_denote_normalize))
         let origin := if index == 0 then some (Provenance.precondition calleeName)
           else if index == 1 then some (.continuation calleeName) else none
-        pending := pending ++ (← getGoals).toArray.map fun g => (g, origin)
+        pending := pending ++ (← getGoals).toArray.map fun g =>
+          (g, origin, if index == 0 then #[] else clauses)
       continue
     if let some subgoals ← recursiveHypothesis? goal then
       -- The invariant at the iteration's end, normalized so that its
       -- conjunction splits into leaves.
       setGoals subgoals
       evalTactic (← `(tactic| all_goals (try leaner_denote_normalize)))
-      pending := pending ++ (← getGoals).toArray.map fun g => (g, some .loopIteration)
+      pending := pending ++ (← getGoals).toArray.map fun g => (g, some .loopIteration, #[])
       stageCost := stageCost.push ("recursive", (← IO.getNumHeartbeats) - stageStart)
       continue
-    if let some subgoals ← splitOnce goal then
+    let splitTarget ← if debug then goal.withContext do
+        pure (some (← instantiateMVars (← goal.getType))) else pure none
+    if let some (subgoals, conditional) ← splitOnce goal then
+      let splitDone ← IO.getNumHeartbeats
       for subgoal in subgoals do
         setGoals [subgoal]
         let target ← subgoal.withContext (instantiateMVars (← subgoal.getType))
         if target.isAppOf ``LeanerIR.Proofs.wp then
-          if provenance matches some (.continuation _) then
-            evalTactic (← `(tactic| try leaner_denote_consume))
-          evalTactic (← `(tactic| try leaner_denote_normalize))
-        pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance)
+          let consumed ← if provenance matches some (.continuation _) then do
+              evalTactic (← `(tactic| try leaner_denote_consume))
+              pure ((← getGoals) != [subgoal])
+            else pure false
+          if conditional || consumed then
+            evalTactic (← `(tactic| try leaner_denote_normalize))
+        pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance, clauses)
+      let finished ← IO.getNumHeartbeats
+      if let some target := splitTarget then
+        let head := match target.getAppFn with
+          | .const name _ => toString name
+          | _ => "?"
+        let action := if target.isAppOfArity ``LeanerIR.Proofs.wp 7 then
+            match (target.getArg! 3).getAppFn with
+            | .const name _ => s!" of {name}"
+            | _ => ""
+          else ""
+        logInfo m!"split {head}{action}: {subgoals.length} goals; split {(splitDone - stageStart) / 1000}k, normalize {(finished - splitDone) / 1000}k"
       stageCost := stageCost.push ("split", (← IO.getNumHeartbeats) - stageStart)
       continue
     setGoals [goal]
@@ -1461,6 +1952,7 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
         remaining.setTag (Name.mkSimple s!"leaf_{residuals.size + 1}")
         residuals := residuals.push remaining
       continue
+    let leafStart ← IO.getNumHeartbeats
     let closed ← try
         -- Without recovery: a failing alternative raises at once, so the
         -- next alternative runs instead of an aborted goal list.
@@ -1469,9 +1961,11 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
       catch failure =>
         if debug then logInfo m!"leaf not decided: {failure.toMessageData}"
         pure false
+    stageCost := stageCost.push (if closed then "leaf" else "undecided",
+      (← IO.getNumHeartbeats) - leafStart)
     unless closed do
       setGoals [goal]
-      reported ← reportObligation goal provenance reported
+      reported ← reportObligation goal provenance clauses reported
       admitGoal goal
   if debug then
     let mut totals : Array (String × Nat × Nat) := #[]
@@ -1488,7 +1982,7 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr))
 
 /-- Split the normalized goal into leaves and decide each; report the
 clause of every leaf that is not decided.  Loops are handled by the
-invariants given as `(site, invariant)` pairs, calls by the callees' theorems,
+invariants given as `(site, function, invariant)` triples, calls by the callees' theorems,
 and the `using` equations rewrite wherever a body brings their terms in. -/
 syntax "leaner_denote_close" &" residual"? (" [" term,* "]")? (" with" " [" term,* "]")?
   (" using" " [" term,* "]")? : tactic
@@ -1498,16 +1992,17 @@ elab_rules : tactic
       $[with [$calls:term,*]]? $[using [$equations:term,*]]?) => do
       if leaner.denoteDebug.get (← getOptions) then
         logInfo m!"normalized verification condition:\n{← getMainGoal}"
-      let mut invariants : Array (Nat × Lean.Expr) := #[]
+      let mut invariants : Array (Nat × Lean.Expr × Lean.Expr) := #[]
       for loop in (loops.map (·.getElems)).getD #[] do
-        let pair ← Lean.Elab.Tactic.elabTerm loop none
-        let pair ← instantiateMVars pair
-        let pair ← whnf pair
-        unless pair.isAppOfArity ``Prod.mk 4 do
-          throwError m!"a loop invariant must be a `(site, invariant)` pair, not {pair}"
-        let some site ← (evalNat (pair.getArg! 2)).run
-          | throwError m!"a loop site must be a numeral, not {pair.getArg! 2}"
-        invariants := invariants.push (site, pair.getArg! 3)
+        let triple ← Lean.Elab.Tactic.elabTerm loop none
+        let triple ← whnf (← instantiateMVars triple)
+        let rest ← whnf (triple.getArg! 3)
+        unless triple.isAppOfArity ``Prod.mk 4 && rest.isAppOfArity ``Prod.mk 4 do
+          throwError m!"a loop invariant must be a `(site, function, invariant)` triple, \
+            not {triple}"
+        let some site ← (evalNat (triple.getArg! 2)).run
+          | throwError m!"a loop site must be a numeral, not {triple.getArg! 2}"
+        invariants := invariants.push (site, rest.getArg! 2, rest.getArg! 3)
       let mut callees : Array (Lean.Expr × String × Lean.Expr) := #[]
       for call in (calls.map (·.getElems)).getD #[] do
         let pair ← Lean.Elab.Tactic.elabTerm call none

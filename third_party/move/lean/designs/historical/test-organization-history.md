@@ -2,7 +2,7 @@
 
 **Archive, not current status.** This preserves the previous ledger and its
 checkpoint narrative through 2026-09-08. Use
-[the current test ledger](test-organization.md) for pass/fail status and remaining
+[the current test ledger](../roadmap.md#tests) for pass/fail status and remaining
 work. Claims such as "passes", "ported", "source checkpoint", "latest", and
 "next" below refer to the checkpoint being described, not necessarily today's
 native-only implementation. Some earlier passes used the now-disabled legacy

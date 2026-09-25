@@ -86,12 +86,18 @@ private def internName (tables : Tables) (namespaceId : NamespaceId)
       let id : NameId := ⟨tables.names.size⟩
       ({ tables with names := tables.names.push { namespaceId, name } }, id)
 
-private def internNamespace (tables : Tables) (segments : Array String) : Tables × NamespaceId :=
+/-- The Move address alias a module's path was spelled with in the unit. -/
+private def aliasOf (unit : CompilationUnit) (segments : Array String) : Option String :=
+  unit.namespaces.findSome? fun ns => (ns.aliases.find? (·.1 == segments)).map (·.2)
+
+private def internNamespace (unit : CompilationUnit) (tables : Tables) (segments : Array String) :
+    Tables × NamespaceId :=
   match namespaceId? tables segments with
   | some id => (tables, id)
   | none =>
       let id : NamespaceId := ⟨tables.namespaces.size⟩
-      ({ tables with namespaces := tables.namespaces.push { segments } }, id)
+      let namespaceRef : NamespaceRef := { segments, alias := aliasOf unit segments }
+      ({ tables with namespaces := tables.namespaces.push namespaceRef }, id)
 
 /-- Expand either an imported symbol (`use a::b::f`; `f`) or an imported
 namespace (`use a::b`; `b::f`). Exactly one matching final segment is required
@@ -146,7 +152,7 @@ private def initialTables (unit : CompilationUnit) : Result Tables := do
   if unit.namespaces.isEmpty then
     throw #[.error "LEANER-NAMESPACE-EMPTY" "a Leaner compilation unit must own a namespace"]
   let namespaceRefs := unit.namespaces.map fun sourceNs =>
-    ({ segments := sourceNs.path } : NamespaceRef)
+    ({ segments := sourceNs.path, alias := aliasOf unit sourceNs.path } : NamespaceRef)
   if namespaceRefs.zipIdx.any fun (namespaceRef, index) =>
       namespaceRefs.take index |>.contains namespaceRef then
     throw #[.error "LEANER-NAMESPACE-DUPLICATE"
@@ -388,7 +394,7 @@ private partial def lowerTypeId (context : TypeContext) (source : Ty) : LowerM T
           (declaring.path, segments[0]?.getD "")
         else
           (segments.extract 0 (segments.size - 1), segments.back!)
-      let (tables, owner) := internNamespace state.tables ownerSegments
+      let (tables, owner) := internNamespace state.source state.tables ownerSegments
       set { state with tables }
       let current ← get
       let name ← match nameId? current.tables owner localName with
@@ -1136,7 +1142,7 @@ private def resolveLocalNominal (segments : Array String) :
   let some sourceNs := state.source.namespaces.find? (·.path == owner)
     | -- The namespace belongs to a dependency: intern its identity the way an
       -- imported type name is interned, and leave its shape to its own unit.
-      let (tables, namespaceId) := internNamespace state.tables owner
+      let (tables, namespaceId) := internNamespace state.source state.tables owner
       let (tables, name) := internName tables namespaceId localName
       set { state with tables }
       return ({ namespaceId, name }, { name := localName, external := true })
@@ -1683,8 +1689,11 @@ private partial def lowerSpecificationPlaceValue (context : ExprContext) (source
       let (reference, _, selectedType) ← resolveNominalField base.2 field span
       let selectedType ← projectSpecTypeId selectedType
       let loc ← addLoc span
-      let id ← pushExpression loc selectedType <| .operation
-        (.data (.select reference field)) #[] #[base.1]
+      -- An enum's field lives in each variant that shares it.
+      let selection : LeanerIR.DataOperation ←
+        if ← nominalHasVariants base.2 then pure (.selectVariants reference #[field])
+        else pure (.select reference field)
+      let id ← pushExpression loc selectedType <| .operation (.data selection) #[] #[base.1]
       return (id, selectedType)
 
 private partial def expressionPlace? : Expr → Option Place
@@ -1780,7 +1789,7 @@ private def resolveExternalRef (segments : Array String) : LowerM QualifiedRef :
   let owner := segments.extract 0 (segments.size - 1)
   let localName := segments.back!
   let state ← get
-  let (tables, namespaceId) := internNamespace state.tables owner
+  let (tables, namespaceId) := internNamespace state.source state.tables owner
   let (tables, name) := internName tables namespaceId localName
   set { state with tables }
   return { namespaceId, name }
@@ -5190,7 +5199,8 @@ private def sourceAttributes (attributes : Array SourceAttribute) : LowerM (Arra
   (attributes.filter fun attr => !isIntrinsicAttribute source attr).mapM lowerSourceAttribute
 
 private def lowerContract (context : ExprContext) (clauses : Array ContractClause)
-    (pragmas : Array Attribute) (implicitRustNoPanic : Bool) (nextLocalId : Nat) :
+    (span : Option Span) (pragmas : Array Attribute) (implicitRustNoPanic : Bool)
+    (nextLocalId : Nat) :
     LowerM (FunctionContract × Array LocalDecl) := do
   let boolType ← internType .bool
   let mut pragmas := pragmas
@@ -5251,8 +5261,13 @@ private def lowerContract (context : ExprContext) (clauses : Array ContractClaus
     let loc ← addLoc {}
     let expression ← pushExpression loc boolType (.value (.bool false))
     conditions := conditions.push { loc, kind := .abortsIf, expression }
+  -- A contract is located at its `spec` item, which covers every clause.
+  let loc ← if conditions.isEmpty then pure none
+    else match span with
+      | some span => some <$> addLoc span
+      | none => pure (conditions[0]?.map (·.loc))
   return ({
-    loc := if conditions.isEmpty then none else conditions[0]?.map (·.loc)
+    loc
     conditions
     modifies
     reads
@@ -5442,8 +5457,9 @@ private def lowerFunction (declaration : FunctionDecl) : LowerM Unit := do
   -- A pragma the contract sets shadows the namespace's setting of the same
   -- name, whatever value each one carries.
   let contractPragmaNames := declaration.pragmas.map (·.name)
-  let (contract, contractLocals) ← lowerContract specContext declaration.contract contractPragmas
-    (state.sourceNamespace.profile == .rust) executableLocals.size
+  let (contract, contractLocals) ← lowerContract specContext declaration.contract
+    declaration.contractSpan contractPragmas (state.sourceNamespace.profile == .rust)
+    executableLocals.size
   let pragmas := contract.pragmas ++
     (state.sourceNamespace.pragmas.zip inheritedPragmas).filterMap fun (inherited, lowered) =>
       if contractPragmaNames.contains inherited.name ||
@@ -5474,13 +5490,10 @@ private def lowerFunction (declaration : FunctionDecl) : LowerM Unit := do
       return { parameter with typeUse := { parameter.typeUse with typeId } }
     let specResults := if resultSpecType == unitType then #[] else
       #[{ result with typeId := resultSpecType }]
-    -- An intrinsic or opaque contract supplies the function's logical model
-    -- externally. Deriving another body from executable control flow would
-    -- both duplicate that model and misinterpret early returns as ordinary
-    -- expressions.
-    let externallyModeled := declaration.pragmas.any fun pragma =>
-      pragma.name == "intrinsic" ||
-        (pragma.name == "opaque" && match pragma.value with | .bool true _ => true | _ => false)
+    -- An intrinsic supplies the function's logical model externally. An
+    -- opaque function's meaning in a specification is still its body:
+    -- opacity only decides how its callers are verified.
+    let externallyModeled := declaration.pragmas.any (·.name == "intrinsic")
     -- A body that jumps out through an early `return`, or iterates, has no
     -- expression-shaped projection either: deriving one would read the jump as
     -- this function's value and the loop as a value it does not have. Such a
@@ -5712,7 +5725,8 @@ private def lowerStruct (declaration : StructDecl) : LowerM Unit := do
     locals := localTypes
     declarations
     returnType := boolType
-    specification := true } declaration.contract pragmas false locals.size
+    specification := true } declaration.contract declaration.contractSpan pragmas false
+    locals.size
   let struct : LeanerIR.StructDecl := {
     loc, name, generics, fields, abilities := declaration.abilities.map Ability.toLIR
     locals := locals ++ contractLocals, contract
@@ -5725,6 +5739,11 @@ private def lowerEnum (declaration : EnumDecl) : LowerM Unit := do
   let state ← get
   let some name := nameId? state.tables state.namespaceId declaration.name
     | failAt "LEANER-ENUM-NAME" s!"enum `{declaration.name}` was not interned"
+  -- LIR represents an enum by its variants: without one it would be a
+  -- structure without fields.
+  if declaration.variants.isEmpty then
+    failAt "LEANER-ENUM-EMPTY" s!"enum `{declaration.name}` declares no variant"
+      (some declaration.span)
   let context ← liftM <| typeContext declaration.generics
   let generics ← declaration.generics.mapM lowerBinder
   let variants ← declaration.variants.mapM fun variant => do
@@ -5791,7 +5810,8 @@ private def lowerEnum (declaration : EnumDecl) : LowerM Unit := do
     locals := localTypes
     declarations
     returnType := boolType
-    specification := true } declaration.contract pragmas false locals.size
+    specification := true } declaration.contract declaration.contractSpan pragmas false
+    locals.size
   let properties := if state.sourceNamespace.profile == .move then #[{
       profile := Profile.move, tag := "struct.variants" }]
     else #[]
@@ -5958,7 +5978,7 @@ private def lowerNamespace (unit : CompilationUnit) (source : Namespace)
       let owner := path.pop
       let localName := path.back!
       let state ← get
-      let (tables, namespaceId) := internNamespace state.tables owner
+      let (tables, namespaceId) := internNamespace state.source state.tables owner
       let (tables, _) := internName tables namespaceId localName
       set { state with tables }
     -- `friend` grants another namespace privileged access. Move records the
@@ -5972,12 +5992,12 @@ private def lowerNamespace (unit : CompilationUnit) (source : Namespace)
         failAt "LEANER-FRIEND-PATH"
           "a friend declaration names `0xADDRESS::module_name` or `alias::module_name`"
           (some declaration.span)
-      let head := declaration.path[0]!
+      let address := declaration.path[0]!
       let name := declaration.path[1]!
-      -- A friend module lives at its declaring module's address, so an alias
-      -- in the address position denotes that same address.
-      let (address, alias) :=
-        if head.startsWith "0x" then (head, none) else (source.path[0]!, some head)
+      unless address.startsWith "0x" do
+        failAt "LEANER-FRIEND-PATH" s!"unknown address alias `{address}`" (some declaration.span)
+      -- The alias it was spelled with, as for any module reference.
+      let alias := aliasOf (← get).source declaration.path
       let payload := packStringPayload
         #[address, packStringPayload (alias.map (#[·]) |>.getD #[]), name]
       modify fun state => { state with output := { state.output with

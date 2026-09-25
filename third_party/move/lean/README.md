@@ -35,20 +35,29 @@ Three claims stay separate:
    bytecode.
 3. A compiler-correctness theorem connecting the two is future work.
 
+A Move file, or a Rust file with its specifications in a LeanerLang file
+beside it, is verified by rendering it as LeanerLang, with every message
+reported at its position in the original files
+([`designs/source-verification.md`](designs/source-verification.md)):
+
+```bash
+leaner-move verify vault.move
+leaner-rust verify bounds.rs      # specifications in bounds.spec.lean
+```
+
 ## Packages
 
 | Package | Purpose |
 |---|---|
 | [`leaner-ir`](leaner-ir/) | The shared typed LIR: RawUnit JSON import, validation, semantics, interpreter, proofs, the denotation-based verifier, and LeanerLang. |
-| [`leaner-move`](leaner-move/) | The Move semantic profile and intrinsic registry, plus the Move exchange frontend (`LeanerMove/Frontend`). |
+| [`leaner-move`](leaner-move/) | The Move semantic profile and intrinsic registry, the Move exchange frontend (`LeanerMove/Frontend`), and the XIR backend (`LeanerMove/Xir`) through which compiler-v2 compiles `.lean` sources to Move bytecode. |
 | [`leaner-rust`](leaner-rust/) | The Rust semantic profile, source backend, and the Lean-owned import CLI over [`rust-exporter`](leaner-rust/rust-exporter/), a standalone Rustc Public exporter of borrow-checked MIR. |
-| [`leaner-e2e-tests`](leaner-e2e-tests/) | Move-to-LeanerLang and Rust-to-LeanerLang baselines and the verification check ledger ([`designs/test-organization.md`](designs/test-organization.md)). |
+| [`leaner-e2e-tests`](leaner-e2e-tests/) | Move-to-LeanerLang and Rust-to-LeanerLang baselines, verification of Move and Rust sources, and the verification check fixtures (ledger in [`designs/roadmap.md`](designs/roadmap.md#tests)). |
 
 [`v0/`](v0/) holds the deprecated reference packages `move`, `move-model`,
-and `transpiler`; no leaner package links them, and only compiler-v2's Lean
-integration still builds against `v0/move`. Designs live in [`designs/`](designs/), with
+and `transpiler`; nothing links them. Designs live in [`designs/`](designs/), with
 executed or superseded ones under [`designs/historical/`](designs/historical/);
-[`designs/roadmap.md`](designs/roadmap.md) orders the work.
+[`designs/roadmap.md`](designs/roadmap.md) holds the status: what is open and the test ledger.
 
 ## Build and test
 
