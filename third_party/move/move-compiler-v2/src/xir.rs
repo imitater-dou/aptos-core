@@ -671,6 +671,7 @@ fn import_source(
         added_id == module_id,
         "model assigned an unexpected module id"
     );
+    env.add_package_friends(module_id);
     for (decl, fun_id) in xir.functions.iter().zip(&function_ids) {
         let qid = module_id.qualified(*fun_id);
         let data = translate_function(
@@ -951,6 +952,7 @@ fn translate_function(
         external_struct_ids,
         function_ids,
         decl,
+        qid,
         loc: func_env.get_loc(),
         function_loc: func_env.get_loc(),
         code: vec![],
@@ -1089,6 +1091,8 @@ struct FunctionTranslator<'a> {
     external_struct_ids: &'a [QualifiedId<StructId>],
     function_ids: &'a [FunId],
     decl: &'a FunctionDecl,
+    /// The function being translated.
+    qid: QualifiedId<FunId>,
     loc: Loc,
     function_loc: Loc,
     code: Vec<Bytecode>,
@@ -3004,6 +3008,105 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// XIR calling into a Move module compiled in the same run, following the
+    /// steps of `run_move_compiler` and reporting after each phase as it does:
+    /// an ordinary function compiles, its warnings reported by the Move checks
+    /// and the XIR function's by the XIR checks; an inline function is rejected.
+    #[test]
+    fn xir_calls_into_move_compiled_in_the_same_run() {
+        struct TempFile(PathBuf);
+        impl Drop for TempFile {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let math =
+            TempFile(std::env::temp_dir().join(format!("xir_math_{}.move", std::process::id())));
+        std::fs::write(
+            &math.0,
+            "module 0x42::math {
+                public fun plain(a: u64, b: u64): u64 { let x = a; x = b; x }
+                public inline fun max(a: u64, b: u64): u64 { if (a > b) a else b }
+            }",
+        )
+        .unwrap();
+        // The result, and the diagnostics reported after the Move checks and
+        // after the XIR checks.
+        let compile = |callee: &str| -> (Result<usize>, String, String) {
+            let options = Options {
+                sources: vec![math.0.to_string_lossy().into_owned()],
+                dependencies: move_stdlib::move_stdlib_files(),
+                named_address_mapping: vec!["std=0x1".to_owned()],
+                ..Options::default()
+            };
+            let mut env = crate::run_checker(options.clone()).unwrap();
+            crate::env_check_and_transform_pipeline(&options).run(&mut env);
+            let mut targets = crate::run_stackless_bytecode_gen(&env);
+            crate::run_stackless_bytecode_pipeline(
+                &env,
+                crate::stackless_bytecode_check_pipeline(&options),
+                &mut targets,
+            );
+            let report = |env: &GlobalEnv| {
+                let mut out = codespan_reporting::term::termcolor::Buffer::no_color();
+                env.report_diag(&mut out, codespan_reporting::diagnostic::Severity::Warning);
+                String::from_utf8_lossy(&out.into_inner()).to_string()
+            };
+            let move_checks = report(&env);
+            crate::env_optimization_pipeline(&options).run(&mut env);
+            let mut targets = crate::run_stackless_bytecode_gen(&env);
+            let mut module =
+                instruction_module(Instr::Call(vec![2], Oper::Function(1), vec![0, 1]));
+            module.functions[0].params = 2;
+            // The result goes to a named local that is never read, which the
+            // XIR checks report.
+            let locals = module.functions[0].locals.len();
+            module.functions[0].local_names = (0..locals)
+                .map(|local| (local == 2).then(|| "unread".to_owned()))
+                .collect();
+            module.functions.truncate(1);
+            module.external_functions = vec![move_model_exchange::XirExternalFunction {
+                address: "0x42".to_owned(),
+                module: "math".to_owned(),
+                function: callee.to_owned(),
+            }];
+            let source = parse_source(
+                PathBuf::from("calls.xir.json"),
+                String::new(),
+                &serde_json::to_string(&module).unwrap(),
+            )
+            .unwrap();
+            let checked = crate::import_and_check_xir(&mut env, &options, &[source]);
+            let xir_checks = report(&env);
+            let result = checked.map(|mut xir_targets| {
+                crate::merge_xir_targets(&mut targets, &mut xir_targets);
+                crate::run_stackless_bytecode_pipeline(
+                    &env,
+                    crate::stackless_bytecode_optimization_pipeline(&options),
+                    &mut targets,
+                );
+                let units = crate::annotate_units(crate::run_file_format_gen(&mut env, &targets));
+                crate::run_bytecode_verifier(&units, &mut env);
+                units.len()
+            });
+            (result, move_checks, xir_checks)
+        };
+        let (plain, move_checks, xir_checks) = compile("plain");
+        assert!(
+            matches!(plain, Ok(2))
+                && move_checks.contains("`x` is unused")
+                && !xir_checks.contains("`x` is unused")
+                && xir_checks.contains("`unread` is unused"),
+            "{plain:?}\nMove checks:\n{move_checks}\nXIR checks:\n{xir_checks}"
+        );
+        let (max, ..) = compile("max");
+        let error = format!("{:#}", max.unwrap_err());
+        assert!(
+            error.contains("`0x42::math::max` has no bytecode"),
+            "{error}"
+        );
     }
 
     #[test]
