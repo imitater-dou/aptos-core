@@ -19,9 +19,14 @@ use move_core_types::{
     ability::{Ability, AbilitySet},
     account_address::AccountAddress,
     identifier::Identifier,
+    language_storage::{
+        BORROW, BORROW_MUT, DOLLAR_SIGN_DELIMITER, PACK, PACK_VARIANT, TEST_VARIANT, UNPACK,
+        UNPACK_VARIANT,
+    },
 };
 use move_model::{
     ast::{Address, Attribute, AttributeValue, ModuleName, Value},
+    metadata::lang_feature_versions::LANGUAGE_VERSION_FOR_PUBLIC_STRUCT,
     model::{
         FieldData, FunId, FunctionKind, GlobalEnv, Loc, ModuleId, Parameter, QualifiedId, StructId,
         TypeParameter, TypeParameterKind,
@@ -588,14 +593,61 @@ fn import_source(
                 ),
             }
         }
+        // The rules the source compiler applies to a struct's visibility: below
+        // the version that has it, a warning, and a resource cannot have it.
+        let abilities = ability_set(decl)?;
+        let visibility = move_visibility(&decl.visibility);
+        if visibility != MoveVisibility::Private {
+            if !env.language_version().language_version_for_public_struct() {
+                env.warning(
+                    &loc,
+                    &format!(
+                        "structs/enums with visibility modifier are only supported at version {} or later",
+                        LANGUAGE_VERSION_FOR_PUBLIC_STRUCT
+                    ),
+                );
+            } else {
+                ensure!(
+                    !abilities.has_ability(Ability::Key),
+                    "struct `{}`: structs/enums with key ability cannot have public, package or friend visibility",
+                    decl.name
+                );
+                // The file format gets functions named `pack$S`, `borrow$S$0`
+                // and so on for this struct; Move source cannot spell `$`.
+                for op in [
+                    PACK,
+                    UNPACK,
+                    PACK_VARIANT,
+                    UNPACK_VARIANT,
+                    TEST_VARIANT,
+                    BORROW,
+                    BORROW_MUT,
+                ] {
+                    let name = format!("{op}{DOLLAR_SIGN_DELIMITER}{}", decl.name);
+                    let clash = xir.functions.iter().find(|function| {
+                        function.name == name
+                            || function
+                                .name
+                                .starts_with(&format!("{name}{DOLLAR_SIGN_DELIMITER}"))
+                    });
+                    if let Some(function) = clash {
+                        bail!(
+                            "function `{}` takes the name of a function generated for struct `{}`",
+                            function.name,
+                            decl.name
+                        );
+                    }
+                }
+            }
+        }
         structs.push(ModelXirStructData {
             name: struct_id.symbol(),
             loc: loc.clone(),
-            abilities: ability_set(decl)?,
+            abilities,
             type_parameters: model_type_parameters(env, &loc, &decl.type_parameters)?,
             fields,
             variants,
-            visibility: MoveVisibility::Private,
+            visibility,
             attributes,
         });
     }
@@ -2680,6 +2732,7 @@ mod tests {
         // this one, so adding it disturbs no function.
         module.structs.push(StructDecl {
             name: "Tagged".to_owned(),
+            visibility: XirVisibility::Private,
             abilities: vec!["drop".to_owned()],
             type_parameters: vec![],
             fields: vec![],
@@ -3107,6 +3160,173 @@ mod tests {
             error.contains("`0x42::math::max` has no bytecode"),
             "{error}"
         );
+    }
+
+    /// Compiles `module` through the production stackless and file-format
+    /// pipelines.
+    fn compile_module(module: &XirModule) -> move_binary_format::CompiledModule {
+        let source = parse_source(
+            PathBuf::from("compiled.xir.json"),
+            String::new(),
+            &serde_json::to_string(module).unwrap(),
+        )
+        .unwrap();
+        let mut env = GlobalEnv::new();
+        let mut targets = FunctionTargetsHolder::default();
+        import_sources(&mut env, &[source], &mut targets).unwrap();
+        let options = Options::default();
+        env.set_extension(options.clone());
+        crate::run_stackless_bytecode_pipeline(
+            &env,
+            crate::stackless_bytecode_optimization_pipeline(&options),
+            &mut targets,
+        );
+        let units = crate::run_file_format_gen(&mut env, &targets);
+        assert!(!env.has_errors());
+        let legacy_move_compiler::compiled_unit::CompiledUnit::Module(unit) = &units[0] else {
+            panic!("expected module")
+        };
+        unit.module.clone()
+    }
+
+    /// A struct's visibility reaches the model; a document without the field,
+    /// written before version 7, reads as private.
+    #[test]
+    fn struct_visibility_reaches_the_model() {
+        let visibility = |module: &XirModule| {
+            let env = import_module(module).unwrap();
+            let name = env.symbol_pool().make(&module.structs[0].name);
+            env.get_module(ModuleId::new(0))
+                .find_struct(name)
+                .unwrap()
+                .get_visibility()
+        };
+        let mut wrong = vec![];
+        for (xir, model) in [
+            (XirVisibility::Private, MoveVisibility::Private),
+            (XirVisibility::Public, MoveVisibility::Public),
+            (XirVisibility::Friend, MoveVisibility::Friend),
+        ] {
+            let mut module = account_module();
+            module.version = move_model_exchange::XIR_VERSION;
+            module.structs[0].visibility = xir;
+            if visibility(&module) != model {
+                wrong.push(format!("{xir:?} did not arrive as {model:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        // A version 6 document has no `visibility` on its structs.
+        let mut json = serde_json::to_value({
+            let mut module = account_module();
+            module.version = 6;
+            module.structs[0].visibility = XirVisibility::Public;
+            module
+        })
+        .unwrap();
+        json["structs"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("visibility")
+            .unwrap();
+        let module: XirModule = serde_json::from_value(json).unwrap();
+        assert_eq!(visibility(&module), MoveVisibility::Private);
+    }
+
+    /// As in Move source, a resource cannot be public or friend.
+    #[test]
+    fn a_resource_cannot_be_public_or_friend() {
+        let mut wrong = vec![];
+        // Struct 1, `Balance`, has `key`; struct 0 does not.
+        for (index, visibility, rejected) in [
+            (1, XirVisibility::Public, true),
+            (1, XirVisibility::Friend, true),
+            (1, XirVisibility::Private, false),
+            (0, XirVisibility::Public, false),
+        ] {
+            let mut module = account_module();
+            module.version = move_model_exchange::XIR_VERSION;
+            module.structs[index].visibility = visibility;
+            match (rejected, import_module(&module)) {
+                (false, Ok(_)) => {},
+                (true, Err(error))
+                    if format!("{error:#}").contains("key ability cannot have public") => {},
+                (_, result) => wrong.push(format!(
+                    "struct {index} {visibility:?}: {:?}",
+                    result.map(|_| ())
+                )),
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// A function cannot take the name of one generated for a visible struct,
+    /// which would otherwise fail only in the bytecode verifier.
+    #[test]
+    fn a_function_cannot_take_a_generated_struct_function_name() {
+        let mut wrong = vec![];
+        for (visibility, function, rejected) in [
+            (XirVisibility::Public, "pack$BalanceValue", true),
+            (XirVisibility::Friend, "borrow_mut$BalanceValue$0", true),
+            (XirVisibility::Private, "pack$BalanceValue", false),
+            (XirVisibility::Public, "pack$Other", false),
+        ] {
+            let mut module = account_module();
+            module.version = move_model_exchange::XIR_VERSION;
+            module.structs[0].visibility = visibility;
+            module.functions[0].name = function.to_owned();
+            match (rejected, import_module(&module)) {
+                (false, Ok(_)) => {},
+                (true, Err(error))
+                    if format!("{error:#}").contains("takes the name of a function generated") => {
+                },
+                (_, result) => wrong.push(format!(
+                    "{visibility:?} `{function}`: {:?}",
+                    result.map(|_| ())
+                )),
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Below the language version with struct visibility, a visible struct
+    /// loads with the source compiler's warning.
+    #[test]
+    fn struct_visibility_needs_its_language_version() {
+        let mut module = account_module();
+        module.version = move_model_exchange::XIR_VERSION;
+        module.structs[1].visibility = XirVisibility::Public;
+        let source = parse_source(
+            PathBuf::from("old.xir.json"),
+            String::new(),
+            &serde_json::to_string(&module).unwrap(),
+        )
+        .unwrap();
+        let mut env = GlobalEnv::new();
+        env.set_language_version(move_model::metadata::LanguageVersion::V2_3);
+        import_sources(&mut env, &[source], &mut FunctionTargetsHolder::default()).unwrap();
+        let mut out = codespan_reporting::term::termcolor::Buffer::no_color();
+        env.report_diag(&mut out, codespan_reporting::diagnostic::Severity::Warning);
+        let warnings = String::from_utf8_lossy(&out.into_inner()).to_string();
+        assert!(
+            warnings.contains("visibility modifier are only supported at version"),
+            "{warnings}"
+        );
+    }
+
+    /// A public struct gets the pack, unpack and field functions other modules
+    /// use; before version 7 the reader made every struct private and they
+    /// were not generated.
+    #[test]
+    fn a_public_struct_gets_its_generated_functions() {
+        let functions = |visibility| {
+            let mut module = account_module();
+            module.version = move_model_exchange::XIR_VERSION;
+            module.structs[0].visibility = visibility;
+            compile_module(&module).function_defs.len()
+        };
+        let private = functions(XirVisibility::Private);
+        let public = functions(XirVisibility::Public);
+        assert!(public > private, "private: {private}, public: {public}");
     }
 
     #[test]

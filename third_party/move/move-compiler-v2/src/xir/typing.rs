@@ -764,6 +764,7 @@ mod tests {
         };
         module.structs.push(StructDecl {
             name: "G".to_owned(),
+            visibility: XirVisibility::Private,
             abilities: copy_drop(),
             type_parameters: vec![TypeParameterDecl {
                 name: "T".to_owned(),
@@ -776,6 +777,7 @@ mod tests {
         });
         module.structs.push(StructDecl {
             name: "E".to_owned(),
+            visibility: XirVisibility::Private,
             abilities: copy_drop(),
             type_parameters: vec![],
             fields: vec![],
@@ -799,6 +801,7 @@ mod tests {
         // 4: `P<A, B> { a: A, b: B }`.
         module.structs.push(StructDecl {
             name: "P".to_owned(),
+            visibility: XirVisibility::Private,
             abilities: copy_drop(),
             type_parameters: vec![param("A", &["copy", "drop"]), param("B", &["copy", "drop"])],
             fields: vec![field(Ty::TypeParameter(0)), Field {
@@ -811,6 +814,7 @@ mod tests {
         // 5: `enum GE<T> { A(T), B(bool) }`.
         module.structs.push(StructDecl {
             name: "GE".to_owned(),
+            visibility: XirVisibility::Private,
             abilities: copy_drop(),
             type_parameters: vec![param("T", &["copy", "drop"])],
             fields: vec![],
@@ -829,6 +833,7 @@ mod tests {
         // 6: `R<T: store> has key { x: T }`.
         module.structs.push(StructDecl {
             name: "R".to_owned(),
+            visibility: XirVisibility::Private,
             abilities: vec!["key".to_owned()],
             type_parameters: vec![param("T", &["store"])],
             fields: vec![field(Ty::TypeParameter(0))],
