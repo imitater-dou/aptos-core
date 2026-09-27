@@ -51,18 +51,21 @@ Open:
   goals it leaves, and a saturation round that only reorders hypotheses
   has reached the fixed point (leaves −17%). Two costs now lead and
   heartbeats do not show the first:
-  - kernel checking, the largest part of the slowest fixtures (47s of
-    `ReturnedMutRefs`, 16s of `VectorOperations`, 13s of `OrderedMap`).
+  - kernel checking, the largest part of the slowest fixtures (31s of
+    `ReturnedMutRefs`, 16s of `VectorOperations`, 11s of `OrderedMap`).
     The denotation rewrites by its equations, which the kernel checks by
     instantiation instead of reducing `Term.denote`'s 61-way recursion
     (kernel −14%, closer −20% across the fixtures). The preparation
     certificates, which the kernel checks by evaluating the validation
     passes, avoid array indexing, which the kernel pays for by walking a
-    list: loan marking iterates lists, and an arena index is built in one
-    traversal (kernel −19%; `marked_eq` 19s to 2s). What remains: the
-    erasure analysis, which reads places and types by list position (10s
-    of `ReturnedMutRefs`, the first verify waiting on it), a `compiled_eq`
-    per function, and the proofs themselves;
+    list: loan marking iterates lists, an arena index is built in one
+    traversal, and the erasure analysis reads places and types through
+    arena indexes (kernel −19%, then `ReturnedMutRefs` 47s to 31s;
+    `marked_eq` 19s to 2s, the erasure chunks 10s to 2s). What remains: a
+    `compiled_eq` per function (up to 1s), which does not come from
+    deriving native types (a per-view table of them saves 1% of its
+    unfolds and costs more to certify than it saves), and the proofs
+    themselves;
   - the price of a `simp` step: every lookup reduces the reducible carriers
     in implicit type arguments (`NTy.carrier`, `HEnv`) by smart unfolding,
     about half of each normalization.

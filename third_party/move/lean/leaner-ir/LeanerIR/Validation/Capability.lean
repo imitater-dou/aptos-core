@@ -877,8 +877,9 @@ resolution index. All namespaces in a validated compilation unit share one
 checked table snapshot, so `NameId` and `TypeId` remain meaningful across the
 returned namespace boundary. -/
 private def nominalDeclarationForType? (unit : ValidatedUnit) (ns : ValidatedNamespace)
-    (typeId : TypeId) : Option (ValidatedNamespace × StructDecl × Array GenericArgument) := do
-  let .nominal name arguments ← ns.tables.types[typeId.index]? | none
+    (typeId : TypeId) (typeAt : Nat → Option Ty := fun index => ns.tables.types[index]?) :
+    Option (ValidatedNamespace × StructDecl × Array GenericArgument) := do
+  let .nominal name arguments ← typeAt typeId.index | none
   let owned : Option (ValidatedNamespace × StructDecl) := do
     let declarationId ← unit.resolution.nominal? name
     let targetNs ← ownedNamespaceForName? unit name
@@ -1060,22 +1061,24 @@ fuel keeps the resolver total, which the semantic-preparation rewrites need
 so a prepared unit stays a computable value. -/
 private def staticPlaceInfoFuel? (unit : ValidatedUnit) (ns : ValidatedNamespace)
     (context : ScanContext) (fuel : Nat)
-    (id : PlaceId) : Option StaticPlaceInfo := do
+    (id : PlaceId) (placeAt : Nat → Option Place := arenaGet? ns.places)
+    (typeAt : Nat → Option Ty := fun index => ns.tables.types[index]?) :
+    Option StaticPlaceInfo := do
   match fuel with
   | 0 => none
   | fuel + 1 =>
-  let place ← arenaGet? ns.places id.index
+  let place ← placeAt id.index
   match place with
   | .localVar localId => do
       let declaration ← context.locals[localId.index]?
       some { typeId := declaration.type.typeId, writable := declaration.mutable }
   | .deref base => do
-      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base
-      let .reference reference ← ns.tables.types[baseInfo.typeId.index]? | none
+      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base placeAt typeAt
+      let .reference reference ← typeAt baseInfo.typeId.index | none
       some { typeId := reference.referent, writable := reference.kind == .mutable }
   | .index base index => do
-      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base
-      match ns.tables.types[baseInfo.typeId.index]? with
+      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base placeAt typeAt
+      match typeAt baseInfo.typeId.index with
       | some (.vector element _) => some { typeId := element, writable := baseInfo.writable }
       | some (.tuple elements) => do
           let index ← literalIndex? ns index
@@ -1083,8 +1086,8 @@ private def staticPlaceInfoFuel? (unit : ValidatedUnit) (ns : ValidatedNamespace
           some { typeId := element, writable := baseInfo.writable }
       | _ => none
   | .subslice base start stop fromEnd => do
-      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base
-      match ns.tables.types[baseInfo.typeId.index]? with
+      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base placeAt typeAt
+      match typeAt baseInfo.typeId.index with
       | some (.vector _ none) => some baseInfo
       | some (.vector element (some (.integer length))) => do
           if length < 0 then none else
@@ -1094,17 +1097,17 @@ private def staticPlaceInfoFuel? (unit : ValidatedUnit) (ns : ValidatedNamespace
           some { typeId := ⟨resultTypeIndex⟩, writable := baseInfo.writable }
       | _ => none
   | .downcast base variant => do
-      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base
-      let (targetNs, declaration, _) ← nominalDeclarationForType? unit ns baseInfo.typeId
+      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base placeAt typeAt
+      let (targetNs, declaration, _) ← nominalDeclarationForType? unit ns baseInfo.typeId typeAt
       let variantName ← sourceName? ns variant
       if declaration.variants.any (fun candidate =>
           sourceName? targetNs candidate.name == some variantName) then
         some { baseInfo with selectedVariant := some variantName }
       else none
   | .field base _ field => do
-      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base
+      let baseInfo ← staticPlaceInfoFuel? unit ns context fuel base placeAt typeAt
       let (targetNs, declaration, instantiations) ←
-        nominalDeclarationForType? unit ns baseInfo.typeId
+        nominalDeclarationForType? unit ns baseInfo.typeId typeAt
       let fieldName ← sourceName? ns field
       let selected ← selectedPlaceFieldTypes? targetNs declaration
         baseInfo.selectedVariant fieldName
@@ -4315,31 +4318,33 @@ loans keep the full prophetic treatment. A node whose type cannot be
 recovered is left unchanged; the executable semantics reports it stuck
 rather than guessing a reference kind. -/
 
-private def isSharedReferenceType (ns : ValidatedNamespace) (typeId : TypeId) : Bool :=
-  match ns.tables.types[typeId.index]? with
+private def isSharedReferenceType (ns : ValidatedNamespace) (typeId : TypeId)
+    (typeAt : Nat → Option Ty := fun index => ns.tables.types[index]?) : Bool :=
+  match typeAt typeId.index with
   | some (.reference reference) => reference.kind == .shared
   | _ => false
 
 private def sharedOperand (ns : ValidatedNamespace) (expressionAt : Nat → Option Expr)
-    (arguments : Array ExprId) : Bool :=
+    (typeAt : Nat → Option Ty) (arguments : Array ExprId) : Bool :=
   match arguments[0]? with
   | some id => match expressionAt id.index with
-    | some expression => isSharedReferenceType ns expression.typeId
+    | some expression => isSharedReferenceType ns expression.typeId typeAt
     | none => false
   | none => false
 
 /-- Rewrite shared dereference and freeze value operations to `copyValue`,
 namespace-wide: the decision reads only the operand's recorded type. -/
 private def eraseSharedValueOperations (ns : ValidatedNamespace)
-    (expressionAt : Nat → Option Expr) : Array Expr :=
+    (expressionAt : Nat → Option Expr)
+    (typeAt : Nat → Option Ty := fun index => ns.tables.types[index]?) : Array Expr :=
   (ns.expressions.toList.map fun node =>
     match node.kind with
     | .operation (.reference .dereference) _ arguments surface =>
-        if sharedOperand ns expressionAt arguments then
+        if sharedOperand ns expressionAt typeAt arguments then
           { node with kind := .operation (.primitive .copyValue) #[] arguments surface }
         else node
     | .operation (.reference (.freeze _)) _ arguments surface =>
-        if sharedOperand ns expressionAt arguments then
+        if sharedOperand ns expressionAt typeAt arguments then
           { node with kind := .operation (.primitive .copyValue) #[] arguments surface }
         else node
     | _ => node).toArray
@@ -4426,15 +4431,15 @@ def reachableDereferences (ns : ValidatedNamespace) (root : ExprId) : List (Nat 
 /-- Find each function's shared dereference sites, typing their bases against
 the owning function's locals in the original arena. Sorting and transitive
 copy application are separate from this traversal. -/
-private def mayContainSharedReference (ns : ValidatedNamespace) : Nat → TypeId → Bool
+private def mayContainSharedReference (typeAt : Nat → Option Ty) : Nat → TypeId → Bool
   | 0, _ => true
   | fuel + 1, typeId =>
-      match arenaGet? ns.tables.types typeId.index with
+      match typeAt typeId.index with
       | some (.reference reference) =>
-          reference.kind == .shared || mayContainSharedReference ns fuel reference.referent
-      | some (.vector element _) => mayContainSharedReference ns fuel element
+          reference.kind == .shared || mayContainSharedReference typeAt fuel reference.referent
+      | some (.vector element _) => mayContainSharedReference typeAt fuel element
       | some (.tuple elements) =>
-          elements.toList.any (mayContainSharedReference ns fuel)
+          elements.toList.any (mayContainSharedReference typeAt fuel)
       | some .unit | some .never | some .bool | some .character | some .string
       | some .bytes | some .address | some .signer | some (.integer ..) => false
       -- Nominal fields, generic parameters, and profile-owned types keep
@@ -4443,41 +4448,51 @@ private def mayContainSharedReference (ns : ValidatedNamespace) : Nat → TypeId
       | _ => true
 
 private def sharedNamespacePlaceCopyChunksWith (unit : ValidatedUnit) (ns : ValidatedNamespace)
-    (expressionAt : Nat → Option Expr) (placeAt : Nat → Option Place) :
+    (expressionAt : Nat → Option Expr) (placeAt : Nat → Option Place)
+    (typeAt : Nat → Option Ty) :
     Array (List (Nat × PlaceId)) :=
+  -- The arenas are read through the given lookups and their sizes taken
+  -- once: the preparation certificates evaluate this in the kernel, which
+  -- walks an array's list for its size and for every element read.
+  let typeFuel := ns.tables.types.size + 1
+  let placeFuel := ns.places.size + 1
   (ns.functions.toList.map fun declaration =>
     match declaration.body with
     | .absent => []
     | .structured root =>
         if !declaration.locals.toList.any (fun entry =>
-            mayContainSharedReference ns (ns.tables.types.size + 1) entry.type.typeId) then
+            mayContainSharedReference typeAt typeFuel entry.type.typeId) then
           []
         else
         let context : ScanContext := { locals := declaration.locals }
         -- Type only sites owned by this body, not every namespace-wide
         -- dereference against each function's unrelated local declarations.
         (reachableDereferencesWith ns expressionAt placeAt root).filter fun (_, base) =>
-          (staticPlaceInfo? unit ns context base).any fun info =>
-            isSharedReferenceType ns info.typeId).toArray
+          (staticPlaceInfoFuel? unit ns context placeFuel base placeAt typeAt).any fun info =>
+            isSharedReferenceType ns info.typeId typeAt).toArray
 
 /-- Unsorted, type-checked sites grouped by namespace and function. -/
 abbrev SharedReferenceErasureChunks := Array (Array (List (Nat × PlaceId)))
 
 def sharedReferenceErasureChunks (marked : ValidatedUnit) : SharedReferenceErasureChunks :=
   (marked.namespaces.toList.map fun ns => sharedNamespacePlaceCopyChunksWith marked ns
-    (arenaGet? ns.expressions) (arenaGet? ns.places)).toArray
+    (arenaGet? ns.expressions) (arenaGet? ns.places) (arenaGet? ns.tables.types)).toArray
 
-/-- Proof-facing indexes are separate from the native array-based traversal. -/
-abbrev SharedReferenceErasureIndexes := List (IndexedArena Expr × IndexedArena Place)
+/-- Proof-facing indexes of each namespace's expressions, places, and types,
+separate from the native array-based traversal. -/
+abbrev SharedReferenceErasureIndexes :=
+  List (IndexedArena Expr × IndexedArena Place × IndexedArena Ty)
 
 def sharedReferenceErasureIndexes (marked : ValidatedUnit) : SharedReferenceErasureIndexes :=
   marked.namespaces.toList.map fun ns =>
-    (IndexedArena.ofArray ns.expressions, IndexedArena.ofArray ns.places)
+    (IndexedArena.ofArray ns.expressions, IndexedArena.ofArray ns.places,
+      IndexedArena.ofArray ns.tables.types)
 
 def sharedReferenceErasureChunksIndexed (marked : ValidatedUnit)
     (indexes : SharedReferenceErasureIndexes) : SharedReferenceErasureChunks :=
-  ((marked.namespaces.toList.zip indexes).map fun (ns, expressions, places) =>
-    sharedNamespacePlaceCopyChunksWith marked ns expressions.get? places.get?).toArray
+  ((marked.namespaces.toList.zip indexes).map fun (ns, expressions, places, types) =>
+    sharedNamespacePlaceCopyChunksWith marked ns expressions.get? places.get?
+      types.get?).toArray
 
 theorem sharedReferenceErasureChunksIndexed_eq (marked : ValidatedUnit) :
     sharedReferenceErasureChunksIndexed marked (sharedReferenceErasureIndexes marked) =
@@ -4532,8 +4547,8 @@ def erasedExpressionArenas (marked : ValidatedUnit) : ErasedExpressionArenas :=
 
 def erasedExpressionArenasIndexed (marked : ValidatedUnit)
     (indexes : SharedReferenceErasureIndexes) : ErasedExpressionArenas :=
-  ((marked.namespaces.toList.zip indexes).map fun (ns, expressions, _) =>
-    eraseSharedValueOperations ns expressions.get?).toArray
+  ((marked.namespaces.toList.zip indexes).map fun (ns, expressions, _, types) =>
+    eraseSharedValueOperations ns expressions.get? types.get?).toArray
 
 theorem erasedExpressionArenasIndexed_eq (marked : ValidatedUnit) :
     erasedExpressionArenasIndexed marked (sharedReferenceErasureIndexes marked) =
@@ -4545,9 +4560,8 @@ theorem erasedExpressionArenasIndexed_eq (marked : ValidatedUnit) :
   | cons ns rest ih =>
       simp only [List.map_cons, List.zip_cons_cons]
       congr 1
-      congr 1
-      funext index
-      simp [IndexedArena.get?_ofArray, arenaGet?_eq, arenaGetNative?]
+      congr 1 <;> funext index <;>
+        simp [IndexedArena.get?_ofArray, arenaGet?_eq, arenaGetNative?]
 
 theorem erasedExpressionArenas_eq_of_indexes {marked : ValidatedUnit}
     {indexes : SharedReferenceErasureIndexes} {arenas : ErasedExpressionArenas}

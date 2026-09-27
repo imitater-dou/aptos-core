@@ -372,7 +372,9 @@ def ResultShape.lendable : ResultShape → Bool
 compiled function: the kernel evaluates the compilation, so a death marker
 reads its loan from these rather than searching every certificate. -/
 def loanFactsOf (unit : ValidatedUnit) (handle : FunctionHandle) : Array CheckedLoanFact :=
-  ((unit.borrowCertificates.find? fun certificate =>
+  -- A list search: the kernel searches an array by reading each element
+  -- through the array's list.
+  ((unit.borrowCertificates.toList.find? fun certificate =>
     certificate.namespaceId == handle.namespaceId &&
       certificate.functionId == handle.functionId).map (·.loans)).getD #[]
 
