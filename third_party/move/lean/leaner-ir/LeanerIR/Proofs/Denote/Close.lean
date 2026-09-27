@@ -1524,6 +1524,44 @@ macro "leaner_denote_normalize" location:(Lean.Parser.Tactic.location)? : tactic
   `(tactic| simp only [lir_denote, lir_denote_norm, lir_denote_eval, Prod.fst, Prod.snd]
     $[$location]?)
 
+/-- The normalization of `leaner_denote_normalize`, as a simp context and its
+simprocs. It reads no hypothesis, so one serves every goal of a target. -/
+def normalization : TacticM (Simp.Context × Simp.SimprocsArray) := do
+  let stx ← `(tactic| simp only [lir_denote, lir_denote_norm, lir_denote_eval, Prod.fst, Prod.snd])
+  let { ctx, simprocs, .. } ← mkSimpContext stx (eraseLocal := false)
+  return (ctx, simprocs)
+
+/-- Normalize the main goal's target as `leaner_denote_normalize` does, taking
+the subterms in `normal` as they are. The closer keeps every goal it holds
+normalized, so the parts of a goal a rule only rearranges, or the values a
+continuation is applied to, are normal already; traversing them again would
+cost as much as normalizing them, while only the structure the step created
+changes. A target nothing rewrites is left as it is. -/
+def normalizeAround (normalization : Simp.Context × Simp.SimprocsArray)
+    (normal : Array Lean.Expr) : TacticM Unit := do
+  let goal ← getMainGoal
+  let saved ← saveState
+  try
+    goal.withContext do
+      let (ctx, simprocs) := normalization
+      let known : Std.HashSet Lean.Expr := normal.foldl (·.insert ·) {}
+      let base := Simp.mkDefaultMethodsCore simprocs
+      let methods := { base with
+        pre := fun e => if known.contains e then return .done { expr := e } else base.pre e
+        dpre := fun e => if known.contains e then return .done e else base.dpre e }
+      let target ← instantiateMVars (← goal.getType)
+      let (result, _) ← Simp.main target ctx (methods := methods)
+      if result.expr == target then return
+      if result.expr.isTrue then
+        goal.assign (← match result.proof? with
+          | some proof => mkOfEqTrue proof
+          | none => pure (mkConst ``True.intro))
+        replaceMainGoal []
+      else
+        replaceMainGoal [← applySimpResultToTarget goal target result]
+  catch _ =>
+    saved.restore
+
 /-- The loop a goal's weakest precondition is over, if any: its site, and
 the arguments of `wp_loopAt` besides the invariant. -/
 private def loopGoal? (goal : MVarId) : MetaM (Option (Nat × Array Lean.Expr)) :=
@@ -1627,8 +1665,11 @@ private def mayBranch (action : Lean.Expr) : MetaM Bool := do
     | _ => false).isSome
 
 /-- A bind at the head of a goal, taken by its rule: the goal with the
-action at the head, and whether the action can branch. -/
-private def bindRule? (goal : MVarId) : MetaM (Option (MVarId × Bool)) := goal.withContext do
+action at the head, whether the action can branch, and what the normalizer
+takes as it is: the action, the continuation the rule builds (normalized
+where it is applied), the two conditions, and the state, in this order. -/
+private def bindRule? (goal : MVarId) : MetaM (Option (MVarId × Bool × Array Lean.Expr)) :=
+    goal.withContext do
   let target ← instantiateMVars (← goal.getType)
   unless target.isAppOfArity ``LeanerIR.Proofs.wp 7 do return none
   let action := (target.getArg! 3).consumeMData.headBeta
@@ -1641,22 +1682,29 @@ private def bindRule? (goal : MVarId) : MetaM (Option (MVarId × Bool)) := goal.
     else return none
   let [unfolded] ← goal.apply (← mkAppM ``Iff.mpr #[rule])
     | throwError "the bind rule did not leave one goal"
-  return some (unfolded, ← mayBranch (action.getArg! (action.getAppNumArgs - 2)))
+  let first := action.getArg! (action.getAppNumArgs - 2)
+  -- The continuation the rule builds is normalized where it is applied, to
+  -- the action's result.
+  let continuation ← unfolded.withContext do
+    pure ((← instantiateMVars (← unfolded.getType)).getArg! 4)
+  return some (unfolded, ← mayBranch first, #[first, continuation] ++ conditions)
 
 /-- Bind a goal's continuation as a local definition, which the normalizer
 leaves folded until the action completes: a branching action reaches it on
 several paths, and no branch renormalizes it. -/
-private def foldContinuation (goal : MVarId) : MetaM MVarId := goal.withContext do
+private def foldContinuation (goal : MVarId) : MetaM (MVarId × Option FVarId) :=
+    goal.withContext do
   let target ← instantiateMVars (← goal.getType)
-  unless target.isAppOfArity ``LeanerIR.Proofs.wp 7 do return goal
+  unless target.isAppOfArity ``LeanerIR.Proofs.wp 7 do return (goal, none)
   let ensures := target.getArg! 4
-  if ensures.isFVar then return goal
+  if ensures.isFVar then return (goal, none)
   let defined ← goal.define continuationName (← inferType ensures) ensures
   let (continuation, folded) ← defined.intro1P
   folded.withContext do
     let target ← instantiateMVars (← folded.getType)
-    folded.replaceTargetDefEq
+    let folded ← folded.replaceTargetDefEq
       (mkAppN target.getAppFn (target.getAppArgs.set! 4 (mkFVar continuation)))
+    return (folded, some continuation)
 
 /-- Strip the `Obligation` markers heading a goal, returning the goal and
 the clause ranges they carried, kept aside for reporting. A contract clause
@@ -1716,6 +1764,11 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
       return found
   let debug := leaner.denoteDebug.get (← getOptions)
   let startHeartbeats ← IO.getNumHeartbeats
+  -- The normalization, built when a step first needs it.
+  let mut normalization? : Option (Simp.Context × Simp.SimprocsArray) := none
+  -- The normal conditions of each continuation folded into a local
+  -- definition.
+  let mut foldedNormal : Std.HashMap FVarId (Array Lean.Expr) := {}
   let mut leaves := 0
   let mut stageCost : Array (String × Nat) := #[]
   let mut reported : Array (ObligationRange × String) := #[]
@@ -1736,11 +1789,16 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
       let .fvar id := target.getAppFn | pure none
       let declaration ← id.getDecl
       if declaration.isLet && declaration.userName == continuationName then
-        pure (some (← zetaDeltaFVars target #[id]).headBeta)
+        pure (some ((← zetaDeltaFVars target #[id]).headBeta,
+          target.getAppArgs ++ (foldedNormal.get? id).getD #[]))
       else pure none
-    if let some unfolded := exit? then
+    if let some (unfolded, values) := exit? then
       setGoals [← goal.replaceTargetDefEq unfolded]
-      evalTactic (← `(tactic| try leaner_denote_normalize))
+      let normalization ← normalization?.getDM normalization
+      normalization? := some normalization
+      -- The values the continuation is applied to, and the conditions it
+      -- passes on, are normal already.
+      normalizeAround normalization values
       if debug then
         let head := match unfolded.getAppFn with
           | .const name _ => toString name
@@ -1754,11 +1812,20 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
       pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance, clauses)
       stageCost := stageCost.push ("exit", (← IO.getNumHeartbeats) - stageStart)
       continue
-    if let some (unfolded, branches) ← bindRule? goal then
+    if let some (unfolded, branches, normal) ← bindRule? goal then
       -- A straight-line action keeps its continuation in place: it reaches
       -- it on one path.
-      setGoals [← if branches then foldContinuation unfolded else pure unfolded]
-      evalTactic (← `(tactic| try leaner_denote_normalize))
+      if branches then
+        let (folded, continuation?) ← foldContinuation unfolded
+        setGoals [folded]
+        -- The conditions the continuation passes on are normal, where it
+        -- is unfolded too.
+        if let some continuation := continuation? then
+          foldedNormal := foldedNormal.insert continuation (normal.extract 2 4)
+      else setGoals [unfolded]
+      let normalization ← normalization?.getDM normalization
+      normalization? := some normalization
+      normalizeAround normalization normal
       pending := pending ++ (← getGoals).toArray.map fun g => (g, provenance, clauses)
       stageCost := stageCost.push ("bind", (← IO.getNumHeartbeats) - stageStart)
       continue
@@ -1889,6 +1956,7 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
         evalTactic (← `(tactic| try leaner_denote_normalize))
         pending := pending ++
           (← rewriteEquations (← getGoals)).toArray.map fun g => (g, provenance, clauses)
+        stageCost := stageCost.push ("inline", (← IO.getNumHeartbeats) - stageStart)
         continue
       evalTactic (← `(tactic| refine LeanerIR.Proofs.Denote.wp_call $proofSyntax ?_ ?_ ?_))
       let subgoals ← getGoals
@@ -1911,6 +1979,7 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
           else if index == 1 then some (.continuation calleeName) else none
         pending := pending ++ (← getGoals).toArray.map fun g =>
           (g, origin, if index == 0 then #[] else clauses)
+      stageCost := stageCost.push ("call", (← IO.getNumHeartbeats) - stageStart)
       continue
     if let some subgoals ← recursiveHypothesis? goal then
       -- The invariant at the iteration's end, normalized so that its
@@ -1970,6 +2039,7 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
       if closed then
         if debug then
           logInfo m!"leaf {leaves} closed cheaply: {((← IO.getNumHeartbeats) - before) / 1000}k heartbeats"
+        stageCost := stageCost.push ("residual", (← IO.getNumHeartbeats) - before)
         continue
       -- The failed attempt's partial work on the goal is undone.
       beforeCheap.restore (restoreInfo := true)
@@ -1994,6 +2064,7 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
       for remaining in ← getGoals do
         remaining.setTag (Name.mkSimple s!"leaf_{residuals.size + 1}")
         residuals := residuals.push remaining
+      stageCost := stageCost.push ("residual", (← IO.getNumHeartbeats) - before)
       continue
     let leafStart ← IO.getNumHeartbeats
     let closed ← try

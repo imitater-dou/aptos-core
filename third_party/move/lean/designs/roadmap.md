@@ -41,19 +41,28 @@ Open:
 - **Not carried by `denote`:** signed bitwise operations, `bytes` and
   fixed-length vectors, the generic residuals of D3 (aliasing instances), unspecified pure callees used as summaries, references
   inside an aggregate, and nested destructuring patterns.
-- **Cost.** Across the Check fixtures the closer spends 3.1G heartbeats:
-  half renormalizing the goal after a bind (1.0G) or a loop exit (0.6G),
-  where every `simp` call pays a per-subterm floor even when nothing
-  rewrites, and a quarter deciding leaves (0.8G). Normalizing only the part
-  of a goal a step changed is the next cost item. Leaves share their
-  bounds: a bound asserted on a goal is not asserted again on the goals it
-  leaves, and a saturation round that only reorders hypotheses has reached
-  the fixed point (leaves −17%; two global borrows with invariants 82M
-  heartbeats, was 107M). A leaf no decider closes costs most: each
-  saturation round over a large context costs 8–18M heartbeats. Every
-  target runs under a budget (`leaner.verifyHeartbeats`, 180M heartbeats by
-  default, the check driver's cap), so a target that does not verify fails
-  within it.
+- **Cost.** Across the Check fixtures the closer spends 2.5G heartbeats:
+  leaves 0.8G, loop exits 0.5G, binds 0.45G. A step normalizes only the
+  structure it creates: the parts a rule rearranges, the values a
+  continuation is applied to, and the conditions a folded continuation
+  passes on are normal already, and the continuation a bind rule builds is
+  normalized where it is applied (binds −55%, exits −18%). Leaves share
+  their bounds: a bound asserted on a goal is not asserted again on the
+  goals it leaves, and a saturation round that only reorders hypotheses
+  has reached the fixed point (leaves −17%). Two costs now lead and
+  heartbeats do not show the first:
+  - kernel checking of the proofs, the largest part of the slowest fixtures
+    (75s of `ReturnedMutRefs`, 26s of `VectorOperations`, 17s of
+    `OrderedMap`): the kernel re-derives the environment and carrier types
+    (`HEnv`, `NRow` by `brecOn`) and the casts over them;
+  - the price of a `simp` step: every lookup reduces the reducible carriers
+    in implicit type arguments (`NTy.carrier`, `HEnv`) by smart unfolding,
+    about half of each normalization.
+
+  A leaf no decider closes costs most: each saturation round over a large
+  context costs 8–18M heartbeats. Every target runs under a budget
+  (`leaner.verifyHeartbeats`, 180M heartbeats by default, the check
+  driver's cap), so a target that does not verify fails within it.
 
 ## 2. Verification across modules
 

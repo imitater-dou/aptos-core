@@ -255,6 +255,12 @@ and nested destructuring patterns.
   ReturnedMutRefs −9%, the cost benchmark −8.7%; the smallest straight-line
   targets pay a step per bind).
   A binder or conjunct of a normalized goal is not renormalized.
+  Every goal the closer holds is normalized, so a step normalizes only the
+  structure it creates: the action, conditions, and state a bind rule
+  rearranges, the values a continuation is applied to, and the conditions
+  a folded continuation passes on are taken as they are, and the
+  continuation a bind rule builds is normalized where it is applied to the
+  action's result (2026-09-27: Check binds −55%, exits −18%, closer −19%).
 - A leaf clears every computation hypothesis first (`contradiction` had
   reduced the whole unit through the preparation hypothesis), adds the
   bounds of every range certificate in context as separate facts (never
