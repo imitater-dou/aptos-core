@@ -1298,6 +1298,94 @@ elab "leaner_denote_simp_by_context" : tactic => withMainContext do
   | (none, _) => replaceMainGoal []
   | (some (_, goal), _) => replaceMainGoal [goal]
 
+/-- The equations that pin a position to the bound of a range when the
+range's premise fails and omega knows the position is within one of it:
+`¬ x < y` pins `x` to `y`, and `¬ x ≤ y` pins `x` to `y + 1`, each read
+with either side as the position. -/
+private def boundEquations (premise : Lean.Expr) : MetaM (Array (Lean.Expr × Lean.Expr)) := do
+  let premise ← whnfR premise
+  match_expr premise with
+  | LT.lt _ _ x y => return #[(x, y), (y, x)]
+  | LE.le _ _ x y => do
+      let one ← mkNumeral (← inferType x) 1
+      return #[(x, ← mkAppM ``HAdd.hAdd #[y, one]), (y, ← mkAppM ``HSub.hSub #[x, one])]
+  | _ => return #[]
+
+/-- A goal at a position one past the range of a quantified hypothesis,
+the step that extends a range invariant by one iteration: the hypothesis
+states the goal for the positions its range premises admit, and one
+premise, a comparison, is not proved at the goal's position. The goal
+splits on that premise: where it holds, the goal is the hypothesis's
+instance; where it fails, omega pins the position to the range's bound,
+and the goal there is decided by the context. -/
+elab "leaner_denote_range_instance" : tactic => do
+  let initial ← saveState
+  let (_, goal) ← (← getMainGoal).intros
+  let candidates ← goal.withContext do
+    (← getLCtx).foldlM (init := #[]) fun found decl => do
+      if decl.isImplementationDetail then return found
+      let ty ← instantiateMVars decl.type
+      return if ty.isForall then found.push decl.toExpr else found
+  -- The context at the bound is normalized first: the facts there come
+  -- from the iteration, such as a tested condition, as they were stated.
+  let closeByContext ← `(tactic| first
+    | leaner_denote_assumption
+    | omega
+    | ((try simp only [lir_denote_norm] at *)
+       leaner_denote_simp_by_context
+       first | done | omega | leaner_denote_assumption))
+  for candidate in candidates.reverse do
+    let saved ← saveState
+    try
+      let premises ← withReducible (goal.apply candidate)
+      let mut failing : Array MVarId := #[]
+      for premise in premises do
+        if ← premise.isAssigned then continue
+        setGoals [premise]
+        try evalTactic (← `(tactic| first | leaner_denote_assumption | omega))
+        catch _ => failing := failing.push premise
+      let #[openPremise] := failing | throwError "not one open premise"
+      let premise ← instantiateMVars (← openPremise.getType)
+      if premise.hasExprMVar then throwError "the open premise is not determined"
+      saved.restore
+      let equations ← goal.withContext (boundEquations premise)
+      if equations.isEmpty then throwError "the open premise is not a comparison"
+      let (holds, fails) ← goal.byCases premise
+      -- Where the premise holds, the goal is the hypothesis's instance.
+      let premises ← holds.mvarId.withContext (withReducible (holds.mvarId.apply candidate))
+      setGoals premises
+      evalTactic (← `(tactic| all_goals first | leaner_denote_assumption | omega))
+      unless (← getGoals).isEmpty do throwError "the instance's premises are open"
+      -- Where it fails, the position is the bound.
+      let mut closed := false
+      for (position, bound) in equations do
+        let .fvar positionId := position | continue
+        let attempt ← saveState
+        try
+          let equation ← fails.mvarId.withContext (mkEq position bound)
+          let proof ← fails.mvarId.withContext do
+            let proofGoal ← mkFreshExprMVar equation
+            setGoals [proofGoal.mvarId!]
+            evalTactic (← `(tactic| omega))
+            instantiateMVars proofGoal
+          let (pinned, atBound) ← (← fails.mvarId.assert `pinned equation proof).intro1P
+          let atBound ← subst atBound pinned
+          let _ := positionId
+          setGoals [atBound]
+          evalTactic closeByContext
+          if (← getGoals).isEmpty then
+            closed := true
+            break
+        catch _ => pure ()
+        attempt.restore
+      if closed then
+        setGoals []
+        return
+    catch _ => pure ()
+    saved.restore
+  initial.restore
+  throwError "no quantified hypothesis has the goal as an instance at or one past its range"
+
 /-- The deciders of a leaf an authored proof may take over: the cheap ones,
 and the goal alone in normal form rewritten by the hypotheses, which is
 cheap where the context is large and decides a leaf whose facts are
@@ -1308,6 +1396,7 @@ macro "leaner_denote_decide_residual" : tactic => `(tactic|
   | omega
   | leaner_denote_decide_cheap
   | leaner_denote_instance
+  | leaner_denote_range_instance
   | (leaner_denote_simp_by_context
      first | done | (leaner_denote_bounds; omega))
   | leaner_denote_trivial)
@@ -1346,8 +1435,19 @@ macro_rules
            leaner_denote_split_hypotheses
            first
            | leaner_denote_decide_cheap
+           -- An instance of a quantified hypothesis, such as a loop
+           -- invariant, at the position or one past its range.
+           | leaner_denote_instance
+           | leaner_denote_range_instance
            | leaner_denote_pipeline
-           | leaner_denote_trivial)))
+           | leaner_denote_trivial
+           -- The instances again once the leaf is normalized as an
+           -- authored proof receives it.
+           | (leaner_denote_prepare
+              all_goals first
+                | done
+                | leaner_denote_instance
+                | leaner_denote_range_instance))))
 
 /-- A structural update of an array literal at literal positions: the
 positions move, the elements are not inspected. -/
@@ -1538,7 +1638,7 @@ attribute [lir_denote_norm] LeanerIR.Proofs.wp_pure
   and_false false_and not_false_eq_true not_true_eq_false true_implies false_implies implies_true
   imp_self eq_self_iff_true ite_true ite_false Bool.false_eq_true Bool.true_eq_false
   Bool.not_eq_false decide_eq_false_iff_not Bool.and_eq_false_imp Bool.not_true Bool.not_false
-  Bool.not_not Option.some.injEq Option.elim_some Option.elim_none LeanerIR.RuntimeValue.field
+  Bool.not_not Bool.not_eq_false' Bool.not_eq_true' Option.some.injEq Option.elim_some Option.elim_none LeanerIR.RuntimeValue.field
   LeanerIR.RuntimeValue.asInt LeanerIR.RuntimeValue.asBool LeanerIR.RuntimeValue.asString
   LeanerIR.RuntimeValue.variant? List.getElem?_toArray List.getElem?_cons_zero
   List.getElem?_cons_succ Option.getD_some LeanerIR.RuntimeValue.nominal.injEq

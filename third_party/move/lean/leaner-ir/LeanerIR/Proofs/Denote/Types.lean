@@ -752,8 +752,11 @@ inductive ResultShape where
   | .none => Unit
   | .one τ => τ.carrier
 
-/-- The type the body of a function must produce. -/
-def ResultShape.bodyType : ResultShape → NTy
+/-- The type the body of a function must produce. Reducible, as
+`ResultShape.carrier` is: a callee's result type reaches instance arguments
+(a lookup's `GetElem?` instance), which simp matches at instance
+transparency only. -/
+@[reducible] def ResultShape.bodyType : ResultShape → NTy
   | .none => .unit
   | .one τ => τ
 
