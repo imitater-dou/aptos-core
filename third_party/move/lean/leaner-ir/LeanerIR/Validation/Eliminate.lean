@@ -40,26 +40,27 @@ private structure AnchorMarks where
 private def pushLoan (loans : Array LoanId) (loan : LoanId) : Array LoanId :=
   if loans.contains loan then loans else loans.push loan
 
-private def addMark (marks : Array AnchorMarks) (anchor : ExprId)
-    (before : Bool) (loan : LoanId) : Array AnchorMarks :=
-  match marks.findIdx? (·.anchor == anchor) with
-  | some index =>
-      marks.modify index fun mark =>
-        if before then { mark with before := pushLoan mark.before loan }
-        else { mark with after := pushLoan mark.after loan }
-  | none =>
-      marks.push <|
-        if before then { anchor, before := #[loan] }
-        else { anchor, after := #[loan] }
+/-- Record a death at its anchor's group, opening a group after the others
+for a new anchor. The groups are a list: the preparation certificates
+evaluate this in the kernel, which reads an array element by walking the
+array's list to it. -/
+private def addMark : List AnchorMarks → ExprId → Bool → LoanId → List AnchorMarks
+  | [], anchor, before, loan =>
+      [if before then { anchor, before := #[loan] } else { anchor, after := #[loan] }]
+  | mark :: rest, anchor, before, loan =>
+      if mark.anchor == anchor then
+        (if before then { mark with before := pushLoan mark.before loan }
+          else { mark with after := pushLoan mark.after loan }) :: rest
+      else mark :: addMark rest anchor before loan
 
 /-- Expression ids consumed as place indexes; their arena slots must keep
 their literal or local shape, so they may never be wrapped. Death anchors
 are operation, branch, or statement nodes, so a collision is an internal
 error rather than an expected case. -/
-private def placeIndexIds (ns : ValidatedNamespace) : Array ExprId :=
-  ns.places.foldl (init := #[]) fun ids place =>
+private def placeIndexIds (ns : ValidatedNamespace) : List ExprId :=
+  ns.places.toList.foldl (init := []) fun ids place =>
     match place with
-    | .index _ index => ids.push index
+    | .index _ index => index :: ids
     | _ => ids
 
 /-- Wrap one anchor slot with its markers. `unitType` types the synthesized
@@ -179,7 +180,7 @@ and therefore every synthesized expression id. Only the final merge touches
 the full original arena; each marker reads its original slot through a
 balanced index, which kernel reduction builds once. -/
 private def markAnchorsBatched (original : Array Expr) (unitType : TypeId)
-    (reserved : Array ExprId) (marks : Array AnchorMarks)
+    (reserved : List ExprId) (marks : List AnchorMarks)
     (diagnostics : Array Diagnostic) : Array Expr × Array Diagnostic :=
   let indexed := IndexedArena.ofArray original
   let (_, appended, patches, diagnostics) := marks.foldl
@@ -216,14 +217,16 @@ def markLoanDeaths (unit : ValidatedUnit) : ValidatedUnit × Array Diagnostic :=
   let (namespaces, diagnostics) :=
     unit.namespaces.zipIdx.foldl (init := (#[], #[])) fun (namespaces, diagnostics) (ns, index) =>
       let namespaceId : NamespaceId := ⟨index⟩
-      let marks := unit.borrowCertificates.foldl (init := #[]) fun marks certificate =>
+      -- Lists throughout: the kernel evaluates this pass in a certificate.
+      let marks := unit.borrowCertificates.toList.foldl (init := []) fun marks certificate =>
         if certificate.namespaceId != namespaceId then marks else
-          certificate.loans.zipIdx.foldl (init := marks) fun marks (loan, loanIndex) =>
-            loan.deaths.foldl (init := marks) fun marks death =>
+          certificate.loans.toList.zipIdx.foldl (init := marks) fun marks (loan, loanIndex) =>
+            loan.deaths.toList.foldl (init := marks) fun marks death =>
               addMark marks death.anchor death.before ⟨loanIndex⟩
       let reserved := placeIndexIds ns
+      let size := ns.expressions.size
       let (expressions, diagnostics) :=
-        if marks.all (fun mark => mark.anchor.index < ns.expressions.size) then
+        if marks.all (fun mark => mark.anchor.index < size) then
           markAnchorsBatched ns.expressions unitType reserved marks diagnostics
         else
         -- Retain the established malformed-certificate diagnostics, including

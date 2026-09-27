@@ -51,14 +51,17 @@ Open:
   goals it leaves, and a saturation round that only reorders hypotheses
   has reached the fixed point (leaves −17%). Two costs now lead and
   heartbeats do not show the first:
-  - kernel checking, the largest part of the slowest fixtures (68s of
-    `ReturnedMutRefs`, 21s of `VectorOperations`, 17s of `OrderedMap`).
+  - kernel checking, the largest part of the slowest fixtures (47s of
+    `ReturnedMutRefs`, 16s of `VectorOperations`, 13s of `OrderedMap`).
     The denotation rewrites by its equations, which the kernel checks by
     instantiation instead of reducing `Term.denote`'s 61-way recursion
-    (kernel −14%, closer −20% across the fixtures). What remains: the
-    module's preparation certificates, which the kernel checks by
-    evaluating the validation passes (`marked_eq` alone 19s of
-    `ReturnedMutRefs`, the first verify waiting on them), a `compiled_eq`
+    (kernel −14%, closer −20% across the fixtures). The preparation
+    certificates, which the kernel checks by evaluating the validation
+    passes, avoid array indexing, which the kernel pays for by walking a
+    list: loan marking iterates lists, and an arena index is built in one
+    traversal (kernel −19%; `marked_eq` 19s to 2s). What remains: the
+    erasure analysis, which reads places and types by list position (10s
+    of `ReturnedMutRefs`, the first verify waiting on it), a `compiled_eq`
     per function, and the proofs themselves;
   - the price of a `simp` step: every lookup reduces the reducible carriers
     in implicit type arguments (`NTy.carrier`, `HEnv`) by smart unfolding,
