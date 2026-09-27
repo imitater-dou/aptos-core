@@ -20,3 +20,14 @@ leaner module 0x49::quantifiers where
   spec length_of where
     ensures ∀ (y in v), y <= MAX_U64 || result > 0
     ensures ∃ (y in v), true -- error: an empty vector has no element
+
+  -- A frame over a vector write: every other index keeps its element, and
+  -- the written index holds the written value.
+  fun write_at(v : &mut Vector<u64>, i : u64) -> Unit := do
+    assert!(v.length > i, 1)
+    v[i] := 7
+
+  spec write_at where
+    aborts_if i >= v.length with 1
+    ensures v[i] == 7
+    ensures ∀ (k in 0 .. v.length), k != i ==> v[k] == old(v)[k]

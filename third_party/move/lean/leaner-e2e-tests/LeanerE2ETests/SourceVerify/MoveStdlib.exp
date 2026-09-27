@@ -525,12 +525,6 @@ but function has type
     Option (LeanerIR.Proofs.Denote.NTy.param 0).vector.carrier
 MoveStdlib/sources/acl.spec.move:10:5: error: leaner verification failed
 MoveStdlib/sources/acl.spec.move:28:5: error: `assert_contains` calls `contains`, which is not verified; verify the callee first
-MoveStdlib/sources/bit_vector.move:65:9: error: the specification clause `ensures ∀ (k in 0 .. self.length),
-        k != bit_index ==> self.bit_field[k] == old(self).bit_field[k]` is not established
-MoveStdlib/sources/bit_vector.move:61:5: error: leaner verification failed
-MoveStdlib/sources/bit_vector.move:82:9: error: the specification clause `ensures ∀ (k in 0 .. self.length),
-        k != bit_index ==> self.bit_field[k] == old(self).bit_field[k]` is not established
-MoveStdlib/sources/bit_vector.move:78:5: error: leaner verification failed
 MoveStdlib/sources/bit_vector.move:174:9: error: the specification clause `ensures ∀ (i in start_index .. result), self.is_index_set(i)` is not established
 MoveStdlib/sources/bit_vector.move:173:9: error: the specification clause `aborts_if self.length <= start_index` is not established
 MoveStdlib/sources/bit_vector.move:160:17: error: the loop invariant `∀ (j in start_index .. index), self.is_index_set(j)` is not preserved by an iteration

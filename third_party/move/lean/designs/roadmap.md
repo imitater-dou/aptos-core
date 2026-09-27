@@ -33,9 +33,13 @@ Open:
   induction over `compileFunction` removes the last project-specific
   assumptions besides the natively checked `bv_decide` certificates.
 - **Quantifier automation.** Specification quantifiers over types, ranges,
-  and vectors (by index, as in the Move Prover) translate; the closer
-  introduces universals but does not instantiate a quantified hypothesis
-  at index terms, extend a range invariant by one iteration, or choose a
+  and vectors (by index, as in the Move Prover) translate. A leaf whose
+  deciders fail on a quantified or conditional goal is retried at an
+  arbitrary instance, within its own heartbeat budget, and a lookup after
+  a vector write is resolved where omega tells the positions apart or
+  equal: frames over a write verify (`bit_vector::set`, `unset`). Open:
+  instantiating a quantified hypothesis at index terms beyond a direct
+  instance, extending a range invariant by one iteration, and choosing a
   witness for an existential. These are the goals of `bit_vector` and
   `acl` below.
 - **Not carried by `denote`:** signed bitwise operations, `bytes` and
@@ -110,7 +114,8 @@ bit-flag functions of `features` (`set`, `contains`) verify. Open:
   quantified postconditions, exceed the verification budget; `apply_diff`
   reaches the recursion limit and reads a parameter with `old` in a loop
   invariant; `on_new_epoch`.
-- `bit_vector`: range-quantified loop invariants and postconditions
+- `bit_vector`: `set` and `unset` verify; the range-quantified loop
+  invariants and postconditions of `longest_set_sequence_starting_at`
   (quantifier automation, section 1);
   `shift_left_for_verification_only` exceeds the verification budget.
 - `acl`: a kernel type mismatch in the denotation of the generic loop of
@@ -223,7 +228,7 @@ files without `verify` targets.
 | Storage | `CrossInv`, `GlobalBorrows`, `GlobalInv`, `LooseFrame`, `Normalized`, `Read`, `ResourceComposition`, `Storage`, `StorageSpecErrors` | `LooseFrame` carries an authored proof. |
 | Calls | `AbstractClauses`, `Callees`, `Calls`, `Composition`, `InlinedCallees`, `Modules`, `Summaries` | Intended negatives: a caller does not see a `[concrete]` result (`AbstractClauses`), an opaque callee's body (`InlinedCallees`), a postcondition a callee of another module refutes (`Modules`). |
 | Generics | `GenericCycles`, `GenericFunctions`, `GenericScalarCalls`, `Generics`, `GenericStorage` | |
-| Specifications | `ContractErrors`, `DomainQuantifiers`, `Increment`, `RecursiveSpecFunctions`, `SpecFunctionErrors`, `SpecFunctions`, `WrongIncrement` | `DomainQuantifiers`: an existential no index satisfies and one over an empty vector (intended). `RecursiveSpecFunctions`: a lemma by induction and a `verify … by` using it. |
+| Specifications | `ContractErrors`, `DomainQuantifiers`, `Increment`, `RecursiveSpecFunctions`, `SpecFunctionErrors`, `SpecFunctions`, `WrongIncrement` | `DomainQuantifiers`: an existential no index satisfies and one over an empty vector (intended); a frame over a vector write verifies. `RecursiveSpecFunctions`: a lemma by induction and a `verify … by` using it. |
 | Modules | `Attributes`, `EmptyModule`, `IntrinsicErrors`, `LoweringErrors`, `PreparationRetry`, `Rust` | `Attributes` and `EmptyModule` have no `verify` targets. |
 | Examples | `Account`, `Corpus`, `OrderedMap`, `Quicksort` | `OrderedMap` and `Quicksort` verify through authored lemmas over arrays; `Quicksort`'s `partition` runs at a raised cap of 400k heartbeats (277M in total). |
 

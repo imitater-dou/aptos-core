@@ -285,6 +285,17 @@ and nested destructuring patterns.
   splits the range-check conditionals, and decides by `omega`/`decide`.
   Signed quotients and remainders use width-specific range facts, not
   magnitudes.
+- A leaf whose deciders fail on a goal that states binders or premises
+  (a quantified clause, an implication) is retried at an arbitrary
+  instance: the binders are introduced through the `Obligation` markers
+  and the deciders run again. Only a failed leaf pays for the retry, since
+  `decide` needs the closed goal and every other leaf keeps its path, and
+  the retry runs within its own heartbeat budget
+  (`instanceAttemptHeartbeats`), so an undecided leaf is still reported
+  rather than exhausting the target's budget. A saturation round whose
+  context holds an array write resolves the lookups after it, with omega
+  discharging that the positions differ or coincide within bounds
+  (2026-09-27: `bit_vector::set` and `unset` verify; Check unchanged).
 - Saturation ends at a fixed point up to the order of the hypotheses (the
   rewriting pass restates a hypothesis it changes after the others), and a
   bound is asserted once per leaf: the closer records, by goal content, the

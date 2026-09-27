@@ -508,6 +508,51 @@ elab "leaner_denote_clear_computations" : tactic => do
     goal ← goal.tryClear fvarId
   replaceMainGoal [goal]
 
+/-- The heartbeats a leaf's attempt at an arbitrary instance may spend. The
+attempt is extra work on a leaf its deciders already failed, so it must
+neither exhaust the target's budget nor turn the leaf's report into a
+timeout; a decided instance costs a few million. -/
+def instanceAttemptHeartbeats : Nat := 20000000
+
+/-- Run a tactic within `instanceAttemptHeartbeats` (and within what is left
+of the enclosing budget); exhausting it is an ordinary failure, which the
+enclosing `first` recovers from. -/
+elab "leaner_denote_budgeted " step:tactic : tactic => do
+  let context ← readThe Core.Context
+  let now ← IO.getNumHeartbeats
+  let remaining := if context.maxHeartbeats == 0 then instanceAttemptHeartbeats
+    else context.initHeartbeats + context.maxHeartbeats - now
+  let budget := max 1 (min remaining instanceAttemptHeartbeats)
+  tryCatchRuntimeEx
+    (withTheReader Core.Context
+      (fun context => { context with initHeartbeats := now, maxHeartbeats := budget })
+      (evalTactic step))
+    fun failure => do
+      if failure.isMaxHeartbeat then throwError "the attempt exceeded its heartbeat budget"
+      throw failure
+
+/-- Introduce the binders and premises a leaf's goal states, through the
+`Obligation` markers heading them: a quantified clause is decided at an
+arbitrary instance, whose premises the deciders then use as hypotheses.
+Fails when there is nothing to introduce. A leaf takes this only after its
+deciders failed on the goal as stated, since `decide` needs a closed goal
+and every other leaf keeps its path. -/
+elab "leaner_denote_intro" : tactic => do
+  if (← getGoals).isEmpty then return
+  let mut goal ← getMainGoal
+  let mut introduced := false
+  repeat
+    let target ← goal.withContext (instantiateMVars (← goal.getType))
+    if target.isAppOfArity ``LeanerIR.Proofs.Obligation 4 then
+      goal ← goal.replaceTargetDefEq (target.getArg! 3)
+    else if target.isForall then
+      let (_, next) ← goal.intro1P
+      goal := next
+      introduced := true
+    else break
+  unless introduced do throwError "the goal states no binder or premise"
+  replaceMainGoal [goal]
+
 /-- Consume the hypotheses a call leaves behind before a computation goal
 is normalized again: an implication whose premise is decided by omega is
 specialized, existentials and conjunctions are destructured, and the
@@ -1016,13 +1061,32 @@ elab "leaner_denote_bounded " step:tactic : tactic => withBounds true step
 bounds. -/
 elab "leaner_denote_inheriting " step:tactic : tactic => withBounds false step
 
+/-- Read positions of written arrays: a lookup at a position omega tells
+apart from the written one reads the array before the write, and a lookup
+at the written position within bounds reads the written value. Runs only
+where the context holds a write, so other leaves pay nothing. -/
+elab "leaner_denote_lookups_after_writes" : tactic => do
+  if (← getGoals).isEmpty then return
+  let goal ← getMainGoal
+  let writes ← goal.withContext do
+    if ((← instantiateMVars (← goal.getType)).find? (·.isConstOf ``Array.setIfInBounds)).isSome then
+      return true
+    (← getLCtx).anyM fun decl => do
+      if decl.isImplementationDetail then return false
+      return ((← instantiateMVars decl.type).find? (·.isConstOf ``Array.setIfInBounds)).isSome
+  unless writes do return
+  evalTactic (← `(tactic| try simp (disch := omega) only [Array.getElem?_setIfInBounds_ne,
+    Array.getElem?_setIfInBounds_self_of_lt, Array.getElem_setIfInBounds_ne,
+    Array.getElem_setIfInBounds_self] at *))
+
 /-- One saturation round: bound the integers, destructure the hypotheses,
 substitute witnesses, and rewrite with every hypothesis. -/
 macro "leaner_denote_saturate_round" : tactic => `(tactic|
   leaner_denote_bounded (
     all_goals leaner_denote_split_hypotheses
     all_goals leaner_denote_subst_vars
-    all_goals (try leaner_simp_all [lir_denote_norm])))
+    all_goals (try leaner_simp_all [lir_denote_norm])
+    all_goals leaner_denote_lookups_after_writes))
 
 /-- Saturate a leaf's context: rounds of rewriting while new hypotheses
 appear, after the round the leaf has already run, at most four. A round
@@ -1254,7 +1318,11 @@ macro "leaner_denote_leaf_cheap" : tactic => `(tactic|
    first
    | leaner_denote_assumption
    | (leaner_denote_split_hypotheses
-      leaner_denote_decide_residual)))
+      leaner_denote_decide_residual)
+   | leaner_denote_budgeted
+      (leaner_denote_intro
+       leaner_denote_split_hypotheses
+       leaner_denote_decide_residual)))
 
 /-- Decide one leaf. -/
 syntax "leaner_denote_leaf" : tactic
@@ -1271,7 +1339,15 @@ macro_rules
           first
           | leaner_denote_decide_cheap
           | leaner_denote_pipeline
-          | leaner_denote_trivial)))
+          | leaner_denote_trivial)
+       -- A quantified or conditional goal, at an arbitrary instance.
+       | leaner_denote_budgeted
+          (leaner_denote_intro
+           leaner_denote_split_hypotheses
+           first
+           | leaner_denote_decide_cheap
+           | leaner_denote_pipeline
+           | leaner_denote_trivial)))
 
 /-- A structural update of an array literal at literal positions: the
 positions move, the elements are not inspected. -/
