@@ -263,6 +263,13 @@ and nested destructuring patterns.
   splits the range-check conditionals, and decides by `omega`/`decide`.
   Signed quotients and remainders use width-specific range facts, not
   magnitudes.
+- Saturation ends at a fixed point up to the order of the hypotheses (the
+  rewriting pass restates a hypothesis it changes after the others), and a
+  bound is asserted once per leaf: the closer records, by goal content, the
+  bounds asserted on a goal and its ancestors, which the rewriting pass has
+  restated or dropped as known, and does not assert them again
+  (2026-09-27: Check leaves −17%, GlobalInv −21%, the composition
+  benchmark −25%).
 - The equation lemmas of `Term.denote` (some seventy cases in a mutual
   structural recursion) are realized under the package's default heartbeat
   budget, which no `set_option` in the file reaches; the `LeanerIR`

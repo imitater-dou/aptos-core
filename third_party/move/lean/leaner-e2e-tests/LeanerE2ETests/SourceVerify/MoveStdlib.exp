@@ -482,11 +482,24 @@ x : (vector✝, snd✝³) = (fst✝, snd✝¹)
 MoveStdlib/sources/acl.spec.move:3:9: error: the specification clause `invariant ∀ (i in 0 .. list.length; j in 0 .. list.length),
         list[i] == list[j] ==> i == j` is not established
 MoveStdlib/sources/acl.spec.move:19:9: error: the specification clause `ensures spec_contains(self, addr)` is not established
-MoveStdlib/sources/acl.move:6:1: error: (deterministic) timeout at `whnf`, maximum number of heartbeats (180000) has been reached
-
-Note: Use `set_option maxHeartbeats <num>` to set the limit.
-
-Hint: Additional diagnostic information may be available using the `set_option diagnostics true` command.
+MoveStdlib/sources/acl.spec.move:18:9: error: the specification clause `aborts_if spec_contains(self, addr) with 1` is not established
+MoveStdlib/sources/acl.move:6:1: error: (kernel) application type mismatch
+  (some { values := self_list.values, bounded := ⋯ }, some addr, some { val := 0, fits := ⋯ },
+      some (LeanerIR.Proofs.Denote.vectorLength { values := self_list.values, bounded := ⋯ }), ()).fst
+argument has type
+  Option (LeanerIR.Proofs.Denote.NTy.param 0).vector.carrier ×
+    LeanerIR.Proofs.Denote.HEnv
+      (LeanerIR.Proofs.Denote.NRow.cons (LeanerIR.Proofs.Denote.NTy.param 0)
+        (LeanerIR.Proofs.Denote.NRow.cons (LeanerIR.Proofs.Denote.NTy.int 64 false)
+          (LeanerIR.Proofs.Denote.NRow.cons (LeanerIR.Proofs.Denote.NTy.int 64 false) LeanerIR.Proofs.Denote.NRow.nil)))
+but function has type
+  Option (LeanerIR.Proofs.Denote.NTy.param 0).vector.carrier ×
+      LeanerIR.Proofs.Denote.HEnv
+        (LeanerIR.Proofs.Denote.NRow.cons (LeanerIR.Proofs.Denote.NTy.param 0)
+          (LeanerIR.Proofs.Denote.NRow.cons (LeanerIR.Proofs.Denote.NTy.int 64 false)
+            (LeanerIR.Proofs.Denote.NRow.cons (LeanerIR.Proofs.Denote.NTy.int 64 false)
+              LeanerIR.Proofs.Denote.NRow.nil))) →
+    Option (LeanerIR.Proofs.Denote.NTy.param 0).vector.carrier
 MoveStdlib/sources/acl.spec.move:16:5: error: leaner verification failed
 MoveStdlib/sources/acl.spec.move:22:5: error: `remove` calls the native `0x1::vector::move_range`, which has no contract; specify it
 MoveStdlib/sources/acl.move:6:1: error: maximum recursion depth has been reached
@@ -525,6 +538,7 @@ MoveStdlib/sources/bit_vector.move:158:17: error: the loop invariant `index == s
 MoveStdlib/sources/bit_vector.move:172:5: error: leaner verification failed
 MoveStdlib/sources/bit_vector.move:199:16: error: the loop invariant `∀ (k in 0 .. self.length - amount),
           self.bit_field[k] == old(self).bit_field[k + amount]` is not established at entry
+MoveStdlib/sources/bit_vector.move:14:9: error: the specification clause `invariant length == bit_field.length` is not established
 MoveStdlib/sources/bit_vector.move:1:1: error: (deterministic) timeout at `whnf`, maximum number of heartbeats (180000) has been reached
 
 Note: Use `set_option maxHeartbeats <num>` to set the limit.

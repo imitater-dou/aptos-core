@@ -308,11 +308,12 @@ where
       scalar ``LeanerIR.Proofs.Codec.bytes ``LeanerIR.Proofs.Denote.NTy.bytes <|>
       scalar ``LeanerIR.Proofs.Codec.unit ``LeanerIR.Proofs.Denote.NTy.unit
 
-/-- The facts a leaf needs beside its hypotheses: the bounds of every
+/-- Assert the facts a leaf needs beside its hypotheses: the bounds of every
 certified integer in context, and the bounds of every bit operation on
-them that the goal or a hypothesis mentions. -/
-elab "leaner_denote_bounds" : tactic => do
-  if (← getGoals).isEmpty then return
+them that the goal or a hypothesis mentions. A fact whose statement is in
+`skip` is not asserted. The statements asserted are returned. -/
+def assertBounds (skip : Array Lean.Expr := #[]) : TacticM (Array Lean.Expr) := do
+  if (← getGoals).isEmpty then return #[]
   let goal ← getMainGoal
   let facts ← goal.withContext do
     let mut facts : Array Lean.Expr := #[]
@@ -427,13 +428,15 @@ elab "leaner_denote_bounds" : tactic => do
   -- A fact already in context is not added again.
   let mut goal := goal
   let mut known ← goal.withContext do
-    (← getLCtx).foldlM (init := (#[] : Array Lean.Expr)) fun known decl => do
+    (← getLCtx).foldlM (init := skip) fun known decl => do
       if decl.isImplementationDetail then pure known
       else pure (known.push (← instantiateMVars decl.type))
+  let mut added := #[]
   for proof in facts do
     let type ← goal.withContext (instantiateMVars (← inferType proof))
     if known.contains type then continue
     known := known.push type
+    added := added.push type
     let asserted ← goal.assert `bounds type proof
     let (_, next) ← asserted.intro1P
     goal := next
@@ -444,6 +447,11 @@ elab "leaner_denote_bounds" : tactic => do
     evalTactic (← `(tactic| try dsimp only at $name:ident))
     goal ← getMainGoal
   replaceMainGoal [goal]
+  return added
+
+/-- Assert the bounds a leaf needs beside its hypotheses (`assertBounds`). -/
+elab "leaner_denote_bounds" : tactic => discard assertBounds
+
 /-- A structure projection applied to a constructor application, reduced. -/
 private def reduceProjection? (e : Lean.Expr) : MetaM (Option Lean.Expr) := do
   let .const name _ := e.getAppFn | return none
@@ -966,22 +974,55 @@ elab "leaner_denote_split_goal" : tactic => do
   let goals ← (← getMainGoal).withContext (splitGoal (← getMainGoal))
   replaceMainGoal goals
 
-/-- One saturation round: rewrite with every hypothesis, destructure what
-the rewriting exposes, and substitute witnesses. -/
-macro "leaner_denote_saturate_round" : tactic => `(tactic| (
-  all_goals leaner_denote_bounds
-  all_goals leaner_denote_split_hypotheses
-  all_goals leaner_denote_subst_vars
-  all_goals (try leaner_simp_all [lir_denote_norm])))
-
 /-- What a saturation round can change of a goal: its target and its
-hypotheses. -/
-private def goalContent (goal : MVarId) : MetaM (Array Lean.Expr) := goal.withContext do
-  let mut content := #[← instantiateMVars (← goal.getType)]
+hypotheses. The hypotheses are compared as a collection: the rewriting
+pass restates the hypotheses it changes after the others, so a round that
+proves nothing new may still reorder them. -/
+private def goalContent (goal : MVarId) : MetaM (Lean.Expr × Array Lean.Expr) := goal.withContext do
+  let mut hypotheses := #[]
   for decl in ← getLCtx do
     unless decl.isImplementationDetail do
-      content := content.push (← instantiateMVars decl.type)
-  return content
+      hypotheses := hypotheses.push (← instantiateMVars decl.type)
+  return (← instantiateMVars (← goal.getType), hypotheses.qsort (·.lt ·))
+
+/-- The bounds asserted on a goal's ancestors, by the goal's content: the
+rewriting pass restates each bound, or drops it as known, so asserting it
+again would only be undone by the next pass. Emptied for every target. -/
+initialize assertedBounds :
+    IO.Ref (Std.HashMap (Lean.Expr × Array Lean.Expr) (Array Lean.Expr)) ← IO.mkRef {}
+
+/-- Take each goal through `step` on its own, after asserting the bounds it
+needs (`assert`), and record the bounds asserted on the goals `step` leaves
+and their ancestors: those are not asserted on them again. -/
+private def withBounds (assert : Bool) (step : Syntax) : TacticM Unit := do
+  let mut remaining := []
+  for goal in ← getGoals do
+    let known := (← assertedBounds.get)[← goalContent goal]?.getD #[]
+    setGoals [goal]
+    let asserted := known ++ (← if assert then assertBounds known else pure #[])
+    evalTactic step
+    let results ← getGoals
+    unless asserted.isEmpty do
+      for result in results do
+        let content ← goalContent result
+        assertedBounds.modify (·.insert content asserted)
+    remaining := remaining ++ results
+  setGoals remaining
+
+/-- Assert the bounds each goal needs, then run a tactic on it. -/
+elab "leaner_denote_bounded " step:tactic : tactic => withBounds true step
+
+/-- Run a tactic on each goal; the goals it leaves have their ancestor's
+bounds. -/
+elab "leaner_denote_inheriting " step:tactic : tactic => withBounds false step
+
+/-- One saturation round: bound the integers, destructure the hypotheses,
+substitute witnesses, and rewrite with every hypothesis. -/
+macro "leaner_denote_saturate_round" : tactic => `(tactic|
+  leaner_denote_bounded (
+    all_goals leaner_denote_split_hypotheses
+    all_goals leaner_denote_subst_vars
+    all_goals (try leaner_simp_all [lir_denote_norm])))
 
 /-- Saturate a leaf's context: rounds of rewriting while new hypotheses
 appear, after the round the leaf has already run, at most four. A round
@@ -1072,10 +1113,9 @@ goals, so that a rewriting pass is never repeated for a later alternative. -/
 macro "leaner_denote_pipeline" : tactic => `(tactic| (
   leaner_denote_subst_vars
   leaner_denote_reduce_projections
-  leaner_denote_bounds
-  try simp (disch := omega) only [LeanerIR.Proofs.Obligation_iff, Nat.reduceAdd,
-    Int.reducePow, Int.reduceSub, Nat.reducePow, Nat.reduceSub, Int.tmod_eq_emod_of_nonneg,
-    Int.tdiv_eq_ediv_of_nonneg, lir_denote_norm] at *
+  leaner_denote_bounded (try simp (disch := omega) only [LeanerIR.Proofs.Obligation_iff,
+    Nat.reduceAdd, Int.reducePow, Int.reduceSub, Nat.reducePow, Nat.reduceSub,
+    Int.tmod_eq_emod_of_nonneg, Int.tdiv_eq_ediv_of_nonneg, lir_denote_norm] at *)
   first
   | done
   | omega
@@ -1084,9 +1124,11 @@ macro "leaner_denote_pipeline" : tactic => `(tactic| (
        | done
        | (leaner_denote_bounds; omega)
        | (leaner_denote_saturate
-          all_goals (try (leaner_denote_split <;> (try leaner_simp_all [lir_denote_norm])))
-          all_goals (try (leaner_denote_split <;> (try leaner_simp_all [lir_denote_norm])))
-          all_goals leaner_denote_split_goal
+          leaner_denote_inheriting
+            (all_goals (try (leaner_denote_split <;> (try leaner_simp_all [lir_denote_norm]))))
+          leaner_denote_inheriting
+            (all_goals (try (leaner_denote_split <;> (try leaner_simp_all [lir_denote_norm]))))
+          leaner_denote_inheriting (all_goals leaner_denote_split_goal)
           leaner_denote_saturate_round
           all_goals (first | (leaner_denote_bounds; omega) | leaner_denote_bv))))))
 
@@ -1638,6 +1680,7 @@ partial def closeGoals (invariants : Array (Nat × Lean.Expr × Lean.Expr))
     (callees : Array (Lean.Expr × String × Lean.Expr)) (equations : Array Lean.Expr := #[])
     (residual : Bool := false) :
     TacticM Unit := do
+  assertedBounds.set {}
   -- In residual mode an undecided leaf is left for an authored proof.
   let mut residuals : Array MVarId := #[]
   -- The target's closed equations, such as its generic calls' frame

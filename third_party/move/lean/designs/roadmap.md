@@ -41,13 +41,19 @@ Open:
 - **Not carried by `denote`:** signed bitwise operations, `bytes` and
   fixed-length vectors, the generic residuals of D3 (aliasing instances), unspecified pure callees used as summaries, references
   inside an aggregate, and nested destructuring patterns.
-- **Cost.** One `simp_all` pass per leaf over the shared context dominates
-  storage targets (100M heartbeats for two global borrows with
-  invariants); sharing it across the leaves of a target is the next cost
-  item. A leaf no decider closes costs most: each saturation round over a
-  large context costs 8–18M heartbeats. Every target runs under a budget
-  (`leaner.verifyHeartbeats`, 180M heartbeats by default, the check
-  driver's cap), so a target that does not verify fails within it.
+- **Cost.** Across the Check fixtures the closer spends 3.1G heartbeats:
+  half renormalizing the goal after a bind (1.0G) or a loop exit (0.6G),
+  where every `simp` call pays a per-subterm floor even when nothing
+  rewrites, and a quarter deciding leaves (0.8G). Normalizing only the part
+  of a goal a step changed is the next cost item. Leaves share their
+  bounds: a bound asserted on a goal is not asserted again on the goals it
+  leaves, and a saturation round that only reorders hypotheses has reached
+  the fixed point (leaves −17%; two global borrows with invariants 82M
+  heartbeats, was 107M). A leaf no decider closes costs most: each
+  saturation round over a large context costs 8–18M heartbeats. Every
+  target runs under a budget (`leaner.verifyHeartbeats`, 180M heartbeats by
+  default, the check driver's cap), so a target that does not verify fails
+  within it.
 
 ## 2. Verification across modules
 
@@ -87,8 +93,9 @@ bit-flag functions of `features` (`set`, `contains`) verify. Open:
   (quantifier automation, section 1);
   `shift_left_for_verification_only` exceeds the verification budget.
 - `acl`: a kernel type mismatch in the denotation of the generic loop of
-  `contains`; `add` exceeds the verification budget; `remove` calls the
-  native `vector::move_range`, which has no contract.
+  `contains`, which `add`, now within the verification budget, meets as
+  well, its clauses open; `remove` calls the native `vector::move_range`,
+  which has no contract.
 - A residual obligation that no clause marker locates is reported at the
   module header, not at the function.
 - **Verification in the Move CLI (later).** The package verifies a
