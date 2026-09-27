@@ -1429,6 +1429,10 @@ theorem wp_loopAt {ρ : ResultShape} {Γ : NRow} (site : Nat)
 attribute [lir_denote high] Choices.select?_single Choices.update?_single
 attribute [lir_denote] Which.project?_eq_some_iff
 
+-- The denotation rewrites by its equations; unfolding remains the fallback
+-- where an equation's type indices do not match the term's at reducible
+-- transparency, as a call's result type does.
+lir_denote_equations Term.denote Args.denote
 attribute [lir_denote] Term.denote Args.denote Function.denote ResultShape.ofBody NTy.ofGround
   closedGeneric
   HList.ofGround

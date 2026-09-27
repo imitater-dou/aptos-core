@@ -261,6 +261,14 @@ and nested destructuring patterns.
   a folded continuation passes on are taken as they are, and the
   continuation a bind rule builds is normalized where it is applied to the
   action's result (2026-09-27: Check binds −55%, exits −18%, closer −19%).
+- `Term.denote` and `Args.denote` rewrite by their equations, taken before
+  the term's arguments are visited, so a proof carries each step as an
+  equation instance the kernel checks by instantiation; unfolding them left
+  no trace, and the kernel re-derived every step by reducing the compiled
+  61-way recursion (its matcher alone some 27k nodes). Unfolding remains
+  the fallback where an equation's type indices do not match at reducible
+  transparency, as a call's result type does (2026-09-27: Check kernel
+  checking −14%, closer −20%).
 - A leaf clears every computation hypothesis first (`contradiction` had
   reduced the whole unit through the preparation hypothesis), adds the
   bounds of every range certificate in context as separate facts (never
