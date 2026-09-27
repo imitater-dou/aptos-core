@@ -296,6 +296,17 @@ and nested destructuring patterns.
   context holds an array write resolves the lookups after it, with omega
   discharging that the positions differ or coincide within bounds
   (2026-09-27: `bit_vector::set` and `unset` verify; Check unchanged).
+- A goal one position past the range of a quantified hypothesis (a range
+  invariant extended by one iteration) splits on the one range premise
+  omega does not prove: where it holds the goal is the hypothesis's
+  instance, where it fails omega pins the position to the bound and the
+  normalized context decides it (`leaner_denote_range_instance`, tried
+  after `leaner_denote_instance` in the residual deciders and the
+  budgeted retry). `ResultShape.bodyType` is reducible, like
+  `ResultShape.carrier`: a callee's result type reaches instance
+  arguments, which simp matches at instance transparency only
+  (2026-09-27: Quicksort's `partition` loses an authored case; the
+  composition benchmark −6% heartbeats).
 - Saturation ends at a fixed point up to the order of the hypotheses (the
   rewriting pass restates a hypothesis it changes after the others), and a
   bound is asserted once per leaf: the closer records, by goal content, the

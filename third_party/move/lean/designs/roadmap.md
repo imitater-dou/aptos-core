@@ -37,10 +37,15 @@ Open:
   deciders fail on a quantified or conditional goal is retried at an
   arbitrary instance, within its own heartbeat budget, and a lookup after
   a vector write is resolved where omega tells the positions apart or
-  equal: frames over a write verify (`bit_vector::set`, `unset`). Open:
+  equal: frames over a write verify (`bit_vector::set`, `unset`). A goal
+  one position past a quantified hypothesis's range splits on the open
+  range premise and is decided at the bound, which extends a range
+  invariant by one iteration (Quicksort's `partition` no longer needs the
+  authored case). Open: that step on a loop invariant in automatic mode
+  (`longest_set_sequence_starting_at`; see
+  [`verification-cost.md`](verification-cost.md), "Resume here"),
   instantiating a quantified hypothesis at index terms beyond a direct
-  instance, extending a range invariant by one iteration, and choosing a
-  witness for an existential. These are the goals of `bit_vector` and
+  instance, and choosing a witness for an existential. These are the goals of `bit_vector` and
   `acl` below.
 - **Not carried by `denote`:** signed bitwise operations, `bytes` and
   fixed-length vectors, the generic residuals of D3 (aliasing instances), unspecified pure callees used as summaries, references
@@ -114,9 +119,8 @@ bit-flag functions of `features` (`set`, `contains`) verify. Open:
   quantified postconditions, exceed the verification budget; `apply_diff`
   reaches the recursion limit and reads a parameter with `old` in a loop
   invariant; `on_new_epoch`.
-- `bit_vector`: `set` and `unset` verify; the range-quantified loop
-  invariants and postconditions of `longest_set_sequence_starting_at`
-  (quantifier automation, section 1);
+- `bit_vector`: `set` and `unset` verify; `longest_set_sequence_starting_at`
+  leaves its range loop invariant (quantifier automation, section 1);
   `shift_left_for_verification_only` exceeds the verification budget.
 - `acl`: a kernel type mismatch in the denotation of the generic loop of
   `contains`, which `add`, now within the verification budget, meets as

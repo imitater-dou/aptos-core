@@ -163,10 +163,10 @@ leanerContinuation✝⁶ : LeanerIR.Proofs.Denote.Flow
       (LeanerIR.Proofs.Denote.ResultShape.finish LeanerIR.Proofs.Denote.Mutables.nil
         (LeanerIR.Proofs.Denote.ResultShape.one LeanerIR.Proofs.Denote.NTy.bool) value)
       (fun value state =>
-        ((!value) = true →
+        (value = false →
             leanerContinuation✝⁷
               (LeanerIR.Proofs.Denote.Flow.value () (some ((self_list, snd✝³), fst✝, snd✝¹), some addr, ())) state) ∧
-          ((!value) = false →
+          (value = true →
             LeanerIR.Proofs.wp
               (LeanerIR.Proofs.Denote.Flow.bind
                 (LeanerIR.Proofs.Spec.bind
@@ -525,10 +525,7 @@ but function has type
     Option (LeanerIR.Proofs.Denote.NTy.param 0).vector.carrier
 MoveStdlib/sources/acl.spec.move:10:5: error: leaner verification failed
 MoveStdlib/sources/acl.spec.move:28:5: error: `assert_contains` calls `contains`, which is not verified; verify the callee first
-MoveStdlib/sources/bit_vector.move:174:9: error: the specification clause `ensures ∀ (i in start_index .. result), self.is_index_set(i)` is not established
-MoveStdlib/sources/bit_vector.move:173:9: error: the specification clause `aborts_if self.length <= start_index` is not established
 MoveStdlib/sources/bit_vector.move:160:17: error: the loop invariant `∀ (j in start_index .. index), self.is_index_set(j)` is not preserved by an iteration
-MoveStdlib/sources/bit_vector.move:158:17: error: the loop invariant `index == start_index || self.is_index_set(index - 1)` is not preserved by an iteration
 MoveStdlib/sources/bit_vector.move:172:5: error: leaner verification failed
 MoveStdlib/sources/bit_vector.move:199:16: error: the loop invariant `∀ (k in 0 .. self.length - amount),
           self.bit_field[k] == old(self).bit_field[k + amount]` is not established at entry
@@ -559,10 +556,9 @@ permitted :
       initialState✝.globals.lookup { namespaceId := { index := 0 }, typeId := { index := 8 }, key := key } =
         Option.map Features.erase (Features_contents key)
 a✝ :
-  (!(initialState✝.globals.lookup
-          { namespaceId := { index := 0 }, typeId := { index := 8 },
-            key := LeanerIR.StorageKey.address "0x1" }).isSome) =
-    false
+  (initialState✝.globals.lookup
+        { namespaceId := { index := 0 }, typeId := { index := 8 }, key := LeanerIR.StorageKey.address "0x1" }).isSome =
+    true
 leanerContinuation✝³ : LeanerIR.Proofs.Denote.Flow LeanerIR.Proofs.Denote.ResultShape.none
     (LeanerIR.Proofs.Denote.NRow.cons LeanerIR.Proofs.Denote.NTy.signer
       (LeanerIR.Proofs.Denote.NRow.cons (LeanerIR.Proofs.Denote.NTy.int 64 false).vector

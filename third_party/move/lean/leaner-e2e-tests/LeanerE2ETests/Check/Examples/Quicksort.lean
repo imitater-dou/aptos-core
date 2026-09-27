@@ -223,16 +223,11 @@ leaner module 0x42::quicksort where
     case leaf_5.isTrue =>
       rw [show lo.val = pivot_index.val by omega]
       assumption
-    case leaf_6 =>
-      by_cases before : i < scan.val
-      · leaner_denote_instance
-      · rw [show i = scan.val by omega, ← lookup_eq (found := ‹values.values[scan.val.toNat]? = some _›)]
-        assumption
-    case leaf_10.isTrue =>
+    case leaf_9.isTrue =>
       rw [show lo.val = scan.val by omega,
         ← lookup_eq (found := ‹values.values[scan.val.toNat]? = some _›)]
       assumption
-    case leaf_10.isFalse.isTrue =>
+    case leaf_9.isFalse.isTrue =>
       rw [← lookup_eq (found := ‹values.values[scan.val.toNat]? = some _›)]
       assumption
 

@@ -176,51 +176,30 @@ Leads, most promising first:
 ## Resume here (2026-09-27, quantifier automation in progress)
 
 The branch has moved on from cost to roadmap §1 **Quantifier automation**.
-The commit "Decide quantified leaves at an instance" is validated:
-`bit_vector::set` and `unset` verify, and the Check suite, the gates and the
-stdlib baseline were all rerun for it.
-
-The WIP commit after it is **not validated**. It has not been through the
-Check suite, the `leaner-ir` gates, the stdlib baseline, or the
-`leaner-move`/`leaner-rust` tests. It contains:
-
-- **`ResultShape.bodyType` is `@[reducible]`** (`Types.lean`). A callee's
-  result type reached instance arguments (a lookup's `GetElem?` instance at
-  `(ResultShape.one τ).bodyType`), which simp matches at instance
-  transparency only. So `Array.getElem?_eq_none_iff` and similar never
-  fired. This fixes the `aborts_if` and the `index - 1` invariant of
-  `bit_vector::longest_set_sequence_starting_at`. It may also let the
-  `call` equation lemma match, so that `Term.lean` can drop the unfolding
-  fallback of `lir_denote_equations` (the `Term.denote`/`Args.denote`
-  attribute); try that, since it is a cost win if it holds.
-- **`Bool.not_eq_false'` and `Bool.not_eq_true'` in `lir_denote_norm`.**
-  This is a global normalization change; check the gates.
-- **`leaner_denote_range_instance`** (`Close.lean`). It handles a goal one
-  position past the range of a quantified hypothesis, which extends a range
-  invariant by one iteration:
-  1. apply the hypothesis;
-  2. require exactly one premise, a comparison, that omega does not prove;
-  3. split on that premise;
-  4. in the branch where the premise fails, pin the position to the bound
-     by omega, substitute, and decide the goal by the normalized context.
-
-  It is tried after `leaner_denote_instance` in two places:
-  `leaner_denote_decide_residual`, and the budgeted fallback of
-  `leaner_denote_leaf`. There it runs first as stated and then after
-  `leaner_denote_prepare`.
-
-What this WIP commit achieves: `longest_set_sequence_starting_at`'s
-`ensures ∀ (i in start_index .. result)` now verifies. **Open:** its loop
-invariant `∀ (j in start_index .. index), self.is_index_set(j)` is still
-"not preserved" in automatic mode, although on the prepared leaf
-(`verify … by all_goals first | leaner_denote_instance |
-leaner_denote_range_instance`) the tactic closes it. Two causes are likely:
+All four package suites are green; the roadmap and
+[`denotation.md`](denotation.md) record what is done. The next leaf to
+work on is the loop invariant
+`∀ (j in start_index .. index), self.is_index_set(j)` of
+`bit_vector::longest_set_sequence_starting_at`. It is "not preserved" in
+automatic mode, although `leaner_denote_range_instance` closes it on the
+prepared leaf (`verify … by all_goals first | leaner_denote_instance |
+leaner_denote_range_instance`). Two causes are likely:
 - the fallback's heartbeat budget (`instanceAttemptHeartbeats`, 20M) is
-  exhausted by the pipeline before the prepared attempt runs;
-- the automatic leaf's goal is not the prepared leaf.
+  spent by the pipeline before the prepared attempt runs;
+- the automatic leaf's goal is not the prepared one.
 
-To find out, time the stages with `-Dweak.leaner.denoteDebug=true`, and
-consider trying the prepared instance attempt before the pipeline.
+Time the stages with `-Dweak.leaner.denoteDebug=true`, and consider trying
+the prepared instance attempt before the pipeline. After it, the next goals
+are:
+- `shift_left_for_verification_only` (budget), and the `bit_vector` struct
+  invariant after it;
+- `acl` (an injectivity invariant over two indices, and the kernel type
+  mismatch in the generic `contains` loop).
+
+`ResultShape.bodyType` is now reducible, so the `call` equation lemma may
+match at reducible transparency. If it does, `Term.lean` can drop the
+unfolding fallback of `lir_denote_equations`, which would be a cost win;
+try it.
 
 Method: build a scratch LeanerLang file from the rendered module
 (`leaner-e2e-tests/LeanerE2ETests/MoveToLeanerLang/MoveStdlib/sources/*.exp.lean`,
@@ -232,16 +211,5 @@ concatenating `error`, `mem`, `vector` for `acl`), and run it with
   `IO.eprintln` (a `logInfo` is undone by `saveState.restore`), shows why
   it fails.
 
-Before merging, validate (see "How to measure"):
-- the Check suite, exact;
-- `leaner-ir` `lake test`, with any gate diff reviewed;
-- the stdlib baseline, regenerated with `UB=1` and its diff reviewed;
-- `leaner-move` and `leaner-rust` tests.
-
-Then update the roadmap (Quantifier automation, the `bit_vector` item) and
-`denotation.md`. After `longest_set_sequence_starting_at`, the next goals
-are:
-- `shift_left_for_verification_only` (budget), and the `bit_vector` struct
-  invariant after it;
-- `acl` (an injectivity invariant over two indices, and the kernel type
-  mismatch in the generic `contains` loop).
+Validate every step as in "How to measure", including the stdlib baseline
+(`UB=1`, diff reviewed).
