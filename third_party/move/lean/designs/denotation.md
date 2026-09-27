@@ -240,6 +240,14 @@ and nested destructuring patterns.
   `Vectors/VectorOperations`, invisible to heartbeats and surfacing as a
   stall inside the first `simp` that had to wait for the kernel. Roles are
   now collected by a traversal from the function root.
+- The kernel reads an array through its list: `a[i]?` walks `i` cells,
+  `size` the whole list, and an indexed `foldl` or `find?` is quadratic.
+  Kernel-evaluated certificates (`marked_eq`, the erasure chunks,
+  `compiled_eq`) therefore iterate lists, read arenas through an
+  `IndexedArena` built in one pass, and count sizes once; an `_eq` lemma
+  ties each indexed form to the native array traversal (2026-09-27: Check
+  kernel checking −19%, `ReturnedMutRefs` 68s to 31s). Measurement notes:
+  [`verification-cost.md`](verification-cost.md).
 - The closer is a worklist: a `wp` over a marked loop takes the loop rule,
   over a callee the callee's theorem, over the recursive iteration the loop
   hypothesis; a syntactic binder, conjunction, or conditional splits; only

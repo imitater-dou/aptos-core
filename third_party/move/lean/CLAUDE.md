@@ -98,6 +98,10 @@ older source-specific work those packages own.
   verification design — one `denote` of validated LIR into `Spec` and one
   agreement theorem against `BigStep`, replacing per-target generated
   agreement proofs; milestones D0–D6 with their fixture gates.
+- [`designs/verification-cost.md`](designs/verification-cost.md): how to
+  measure verification cost (heartbeat stages, profiler categories, kernel
+  unfold diagnostics), what the kernel pays for, rejected experiments, and
+  the open leads.
 - [`designs/leaner-lang.md`](designs/leaner-lang.md): the profile-aware Leaner
   source language over the shared IR, generalizing the Move-profile surface.
 - [`designs/prophetic-references.md`](designs/prophetic-references.md):

@@ -41,7 +41,8 @@ Open:
 - **Not carried by `denote`:** signed bitwise operations, `bytes` and
   fixed-length vectors, the generic residuals of D3 (aliasing instances), unspecified pure callees used as summaries, references
   inside an aggregate, and nested destructuring patterns.
-- **Cost.** Across the Check fixtures the closer spends 2.5G heartbeats:
+- **Cost** (measurement notes, rejected experiments, and leads:
+  [`verification-cost.md`](verification-cost.md)). Across the Check fixtures the closer spends 2.5G heartbeats:
   leaves 0.8G, loop exits 0.5G, binds 0.45G. A step normalizes only the
   structure it creates: the parts a rule rearranges, the values a
   continuation is applied to, and the conditions a folded continuation
