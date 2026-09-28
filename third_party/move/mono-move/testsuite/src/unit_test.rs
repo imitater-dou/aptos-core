@@ -6,14 +6,15 @@
 //! gets wrong is a failure.
 
 use crate::{
-    engine::build_natives, extensions::seed_extensions, module_provider::InMemoryModuleProvider,
-    resource_provider::InMemoryResourceProvider,
+    engine::build_natives,
+    extensions::seed_extensions,
+    module_provider::InMemoryModuleProvider,
+    resource_provider::{seed_features, InMemoryResourceProvider},
 };
-use aptos_types::on_chain_config::{Features, OnChainConfig};
 use legacy_move_compiler::unit_test::{ExpectedFailure, NamedOrBytecodeModule, TestCase};
 use mono_move_core::{
     types::{is_signer_or_signer_immut_ref, EMPTY_TYPE_LIST},
-    ExecutionErrorKind, GasMeter, Interner, VMInternalError,
+    ExecutionErrorKind, GasMeter, VMInternalError,
 };
 use mono_move_global_context::{ExecutionGuard, GlobalContext};
 use mono_move_loader::{Loader, LoaderError, LoadingPolicy, LoweringPolicy};
@@ -84,26 +85,6 @@ fn module_of(info: &NamedOrBytecodeModule) -> &CompiledModule {
         NamedOrBytecodeModule::Named(named) => &named.module,
         NamedOrBytecodeModule::Bytecode(module) => module,
     }
-}
-
-/// Heap for the seeded `Features` resource. Only that one small resource lives
-/// here, so a modest fixed size is plenty.
-const RESOURCE_HEAP_SIZE: usize = 1 << 20;
-
-/// Builds a resource provider publishing the framework `Features` resource at
-/// `0x1`, initialized to [`Features::default_for_tests`].
-fn seed_features<'guard, 'ctx>(
-    guard: &'guard ExecutionGuard<'ctx>,
-) -> InMemoryResourceProvider<'guard, 'ctx> {
-    let struct_tag = Features::struct_tag();
-    let module_id = guard.module_id_of(&struct_tag.address, struct_tag.module.as_ident_str());
-    let name = guard.identifier_of(struct_tag.name.as_ident_str());
-    let ty = guard.nominal_of(module_id, name, guard.type_list_of(&[]));
-    let bytes = bcs::to_bytes(&Features::default_for_tests()).expect("Features serializes");
-
-    let mut provider = InMemoryResourceProvider::new(guard, RESOURCE_HEAP_SIZE);
-    provider.add_resource(struct_tag.address, ty, bytes);
-    provider
 }
 
 /// Execute one test function on mono-move and adjudicate it against its

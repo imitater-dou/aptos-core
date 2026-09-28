@@ -8,12 +8,13 @@
 //! Materialization is lazy because a type's layout is only published once the
 //! function that accesses it has been lowered.
 
+use aptos_types::on_chain_config::{Features, OnChainConfig};
 use mono_move_core::{
     storage::resource_provider::{
         InMemoryStorageKey, ResourceProvider, ResourceProviderError, StorageRead,
     },
     types::InternedType,
-    FrameOffset, LayoutKind, LayoutProvider, ValueLayout, OBJECT_HEADER_SIZE,
+    FrameOffset, Interner, LayoutKind, LayoutProvider, ValueLayout, OBJECT_HEADER_SIZE,
 };
 use mono_move_global_context::ExecutionGuard;
 use mono_move_runtime::{deserialize_into, Heap, SharedArena};
@@ -117,6 +118,30 @@ impl ResourceProvider for InMemoryResourceProvider<'_, '_> {
             None => Ok(StorageRead::DoesNotExist),
         }
     }
+}
+
+/// Heap for the seeded `Features` resource. Only that one small resource lives
+/// here, so a modest fixed size is plenty.
+const FEATURES_HEAP_SIZE: usize = 1 << 20;
+
+/// Builds a resource provider publishing the framework `Features` resource at
+/// `0x1`, initialized to [`Features::default_for_tests`].
+pub fn seed_features<'guard, 'ctx>(
+    guard: &'guard ExecutionGuard<'ctx>,
+) -> InMemoryResourceProvider<'guard, 'ctx> {
+    let struct_tag = Features::struct_tag();
+    let module_id = guard.module_id_of(&struct_tag.address, struct_tag.module.as_ident_str());
+    let name = guard.identifier_of(struct_tag.name.as_ident_str());
+    let ty = guard.nominal_of(module_id, name, guard.type_list_of(&[]));
+
+    let mut provider = InMemoryResourceProvider::new(guard, FEATURES_HEAP_SIZE);
+    provider.add_resource(struct_tag.address, ty, features_blob());
+    provider
+}
+
+/// BCS bytes of the `Features` resource the test harnesses seed at `0x1`.
+pub fn features_blob() -> Vec<u8> {
+    bcs::to_bytes(&Features::default_for_tests()).expect("Features serializes")
 }
 
 /// Materializes one resource of type `ty` from its BCS `blob` into `heap`, returning a pointer to
