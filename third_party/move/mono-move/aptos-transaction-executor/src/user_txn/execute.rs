@@ -1,8 +1,8 @@
 // Copyright (c) Aptos Foundation
 // Licensed pursuant to the Innovation-Enabling Source Code License, available at https://github.com/aptos-labs/aptos-core/blob/main/LICENSE
 
-//! The user-transaction execution flow: pre-execution checks, then one
-//! session hosting the prologue, the payload, and the epilogue.
+//! The user-transaction execution flow: one session hosting the pre-execution
+//! checks, the prologue, the payload, and the epilogue.
 
 use super::{
     entry_func::call_entry_function,
@@ -58,20 +58,55 @@ impl<'guard> AptosTransactionExecutor<'guard> {
         aux_info: &AuxiliaryInfo,
     ) -> Result<TxnOutcome, DiscardReason> {
         let guard = self.guard;
+        let txn_data = TxnMetadata::new(txn, aux_info);
+
+        // ========================== Session setup ===========================
+        // One session hosts the whole transaction: prologue, payload, epilogue.
+        // TODO(completeness): make the loading policy configurable.
+        let loader = Loader::new_with_policy(
+            guard,
+            self.module_provider,
+            LoadingPolicy::Lazy(LoweringPolicy::Lazy),
+            self.natives,
+        );
+
+        let extensions = transaction_extensions(&txn_data, self.usage);
+
+        let max_gas = txn_data.max_gas_amount;
+        // TODO(metering): charge the transaction's base cost: intrinsic gas
+        // plus the keyless, SLH-DSA, and decryption surcharges.
+        let mut interp = InterpreterContext::new(
+            loader,
+            // TODO(metering): MonoMove gas units are uncalibrated; budgeting
+            // 1:1 against the transaction's gas units is a placeholder.
+            GasMeter::new(max_gas),
+            self.data_provider,
+            self.natives,
+        )
+        .with_extensions(extensions);
+
+        // TODO(correctness): every path out of here must call `interp.finish()`.
+        // Block-STM validates a parallel transaction against the read set
+        // `finish` returns, so a discard that skips it drops the transaction's
+        // dependencies. It also parks the interpreter stack for reuse.
 
         // ======================== Pre-execution checks ========================
-        // Reject what this executor cannot execute, before touching any state.
-        let txn_data = TxnMetadata::new(txn, aux_info);
+        // Reject what this executor cannot execute, before any Move code runs.
         let gas_params = self.env.gas_params().as_ref().map_err(|e| {
             DiscardReason::InvariantViolation(format!("the gas schedule is unavailable: {e}"))
         })?;
-        // Only a script can be one governance has approved.
+        // Only a script can be one governance has approved. The read is
+        // unmetered, like V1's config reads.
         let approved_gov_scripts = if txn_data.script_hash.is_empty() {
             None
         } else {
-            read_config::<ApprovedExecutionHashes>(guard, self.data_provider)
-                .ok()
-                .flatten()
+            interp
+                .unmetered(|interp| read_config::<ApprovedExecutionHashes>(interp, guard))
+                .map_err(|e| {
+                    DiscardReason::InvariantViolation(format!(
+                        "the approved script hashes are unreadable: {e}"
+                    ))
+                })?
         };
         PreExecutionChecker::new(
             gas_params,
@@ -104,36 +139,6 @@ impl<'guard> AptosTransactionExecutor<'guard> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| DiscardReason::InvalidTypeArgument(format!("{e:#}")))?;
         let ty_args = guard.type_list_of(&interned_ty_args);
-
-        // ========================== Session setup ===========================
-        // One session hosts the whole transaction: prologue, payload, epilogue.
-        // TODO(completeness): make the loading policy configurable.
-        let loader = Loader::new_with_policy(
-            guard,
-            self.module_provider,
-            LoadingPolicy::Lazy(LoweringPolicy::Lazy),
-            self.natives,
-        );
-
-        let extensions = transaction_extensions(&txn_data, self.usage);
-
-        let max_gas = txn_data.max_gas_amount;
-        // TODO(metering): charge the transaction's base cost: intrinsic gas
-        // plus the keyless, SLH-DSA, and decryption surcharges.
-        let mut interp = InterpreterContext::new(
-            loader,
-            // TODO(metering): MonoMove gas units are uncalibrated; budgeting
-            // 1:1 against the transaction's gas units is a placeholder.
-            GasMeter::new(max_gas),
-            self.data_provider,
-            self.natives,
-        )
-        .with_extensions(extensions);
-
-        // TODO(correctness): every path out of here must call `interp.finish()`.
-        // Block-STM validates a parallel transaction against the read set
-        // `finish` returns, so a discard that skips it drops the transaction's
-        // dependencies. It also parks the interpreter stack for reuse.
 
         let signers = ValidationSigners::new(&txn_data);
 
