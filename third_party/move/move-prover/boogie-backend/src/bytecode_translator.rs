@@ -25,7 +25,7 @@ use crate::{
         boogie_type_suffix_for_struct, boogie_type_suffix_for_struct_variant,
         boogie_variant_field_update, boogie_well_formed_check, boogie_well_formed_expr,
         bv_flag_for_type, compute_evaluator_memory_union, field_bv_flag_global_state,
-        normalized_inst_id, EmittedEntities, TypeIdentToken,
+        fun_param_memory, normalized_inst_id, EmittedEntities, TypeIdentToken,
     },
     options::BoogieOptions,
     spec_translator::{LabelInfo, SpecTranslator},
@@ -1293,8 +1293,7 @@ impl<'env> BoogieTranslator<'env> {
                 self.writer.indent();
             }
             // Build memory args for this param from access_of declarations.
-            let (used_memory, old_memory) =
-                Self::get_param_memory(self.env, &info.fun, info.param_sym);
+            let (used_memory, old_memory) = fun_param_memory(self.env, &info.fun, info.param_sym);
             let mem_args = self.build_spec_memory_args(&used_memory, &old_memory, &[], &None, None);
 
             // Build the argument list for behavioral predicates.
@@ -2293,7 +2292,7 @@ impl<'env> BoogieTranslator<'env> {
         let quantifier: Vec<String> = mem_decls.iter().chain(data_decls.iter()).cloned().collect();
 
         let bp_name = boogie_behavioral_spec_fun_name(env, &info.fun, info.param_sym, kind, &[]);
-        let (used, old) = Self::get_param_memory(env, &info.fun, info.param_sym);
+        let (used, old) = fun_param_memory(env, &info.fun, info.param_sym);
         let (_, param_mem_args) = Self::build_memory_params(env, &used, &old);
         let mut rhs_args: Vec<String> = param_mem_args;
         for pos in 0..params.len() {
@@ -2648,7 +2647,7 @@ impl<'env> BoogieTranslator<'env> {
             eval_args.extend(param_args.iter().cloned());
             let eval_call = format!("{}({})", result_of_name, eval_args.join(", "));
 
-            let (used_memory, old_memory) = Self::get_param_memory(env, &info.fun, info.param_sym);
+            let (used_memory, old_memory) = fun_param_memory(env, &info.fun, info.param_sym);
             let (_, mut rhs_args) = Self::build_memory_params(env, &used_memory, &old_memory);
             rhs_args.extend(param_args.iter().cloned());
             let rhs = format!(
@@ -3792,7 +3791,7 @@ impl<'env> BoogieTranslator<'env> {
             }
         }
         for info in fun_param_infos.iter() {
-            let (used_memory, _) = Self::get_param_memory(env, &info.fun, info.param_sym);
+            let (used_memory, _) = fun_param_memory(env, &info.fun, info.param_sym);
             let fun_env = env.get_function(info.fun.to_qualified_id());
             let has_access_of = fun_env
                 .get_fun_param_access_of()
@@ -3814,7 +3813,7 @@ impl<'env> BoogieTranslator<'env> {
                 .extend(behavioral_old_memory_instantiated(&fun_env, &info.fun.inst));
         }
         for info in fun_param_infos.iter() {
-            let (_, old) = Self::get_param_memory(env, &info.fun, info.param_sym);
+            let (_, old) = fun_param_memory(env, &info.fun, info.param_sym);
             old_memory_resources.extend(old);
         }
         (frame_save_resources, old_memory_resources)
@@ -3844,7 +3843,7 @@ impl<'env> BoogieTranslator<'env> {
             union_old_memory.extend(behavioral_old_memory_instantiated(&fun_env, &info.fun.inst));
         }
         for info in fun_param_infos {
-            let (used, old) = Self::get_param_memory(env, &info.fun, info.param_sym);
+            let (used, old) = fun_param_memory(env, &info.fun, info.param_sym);
             union_used_memory.extend(used);
             union_old_memory.extend(old);
         }
@@ -3884,36 +3883,6 @@ impl<'env> BoogieTranslator<'env> {
         let inst_old = behavioral_old_memory_instantiated(fun_env, inst);
         let (_, args) = Self::build_memory_params(env, &inst_used, &inst_old);
         args
-    }
-
-    /// Reads pre-computed `(used_memory, old_memory)` from `access_of` for a function parameter.
-    /// Memory is computed during the spec_rewriter pass and stored on `FunParamAccessOf`.
-    fn get_param_memory(
-        env: &GlobalEnv,
-        fun_qid: &QualifiedInstId<FunId>,
-        param_sym: Symbol,
-    ) -> (
-        BTreeSet<QualifiedInstId<StructId>>,
-        BTreeSet<QualifiedInstId<StructId>>,
-    ) {
-        let fun_env = env.get_function(fun_qid.to_qualified_id());
-        for access in fun_env.get_fun_param_access_of() {
-            if access.fun_param == param_sym {
-                // Instantiate with the function's type parameters
-                let used = access
-                    .used_memory
-                    .iter()
-                    .map(|m| m.clone().instantiate(&fun_qid.inst))
-                    .collect();
-                let old = access
-                    .old_memory
-                    .iter()
-                    .map(|m| m.clone().instantiate(&fun_qid.inst))
-                    .collect();
-                return (used, old);
-            }
-        }
-        (BTreeSet::new(), BTreeSet::new())
     }
 
     /// Builds memory parameter declarations for Boogie functions following the dual-state pattern.
@@ -4152,8 +4121,7 @@ impl<'env> BoogieTranslator<'env> {
 
         for info in fun_param_infos {
             // Derive memory parameters from access_of declarations
-            let (used_memory, old_memory) =
-                Self::get_param_memory(self.env, &info.fun, info.param_sym);
+            let (used_memory, old_memory) = fun_param_memory(self.env, &info.fun, info.param_sym);
             let (mem_param_decls, mem_args) =
                 Self::build_memory_params(self.env, &used_memory, &old_memory);
 
@@ -9152,7 +9120,7 @@ fn derive_param_frame_access(
     let mut result = BTreeMap::new();
 
     // Get all resources used by this parameter
-    let (used_memory, _old_memory) = BoogieTranslator::get_param_memory(env, fun_qid, param_sym);
+    let (used_memory, _old_memory) = fun_param_memory(env, fun_qid, param_sym);
 
     // Find modifies_of/reads_of declaration for this parameter
     let param_access = fun_env.get_fun_param_access_of();

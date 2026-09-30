@@ -23,6 +23,7 @@ module 0x42::lambda_nested_hof_memory_err {
     spec apply {
         pragma opaque;
         pragma verify = false;
+        modifies_of<f> *;
         requires requires_of<f>(x);
         aborts_if aborts_of<f>(x);
         ensures ensures_of<f>(x);

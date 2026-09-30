@@ -1,0 +1,89 @@
+Move prover returns: exiting with verification errors
+error: post-condition does not hold
+   ┌─ tests/sources/regression/fun_param_wildcard_frame.move:19:9
+   │
+19 │         ensures result;
+   │         ^^^^^^^^^^^^^^^
+   │
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:11: read_call_read
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:18: read_call_read (spec)
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:11: read_call_read
+   =         fv = <redacted>
+   =         a = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:12: read_call_read
+   =         before = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:13: read_call_read
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:14: read_call_read
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:11: read_call_read
+   =         result = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:19: read_call_read (spec)
+
+error: post-condition does not hold
+   ┌─ tests/sources/regression/fun_param_wildcard_frame.move:29:9
+   │
+29 │         ensures R[a].value == old(R[a].value);
+   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:23: value_unchanged
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:28: value_unchanged (spec)
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:23: value_unchanged
+   =         fv = <redacted>
+   =         a = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:24: value_unchanged
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:29: value_unchanged (spec)
+
+error: post-condition does not hold
+   ┌─ tests/sources/regression/fun_param_wildcard_frame.move:39:9
+   │
+39 │         ensures exists<R>(a);
+   │         ^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:33: still_exists
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:38: still_exists (spec)
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:33: still_exists
+   =         fv = <redacted>
+   =         a = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:34: still_exists
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:39: still_exists (spec)
+
+error: post-condition does not hold
+   ┌─ tests/sources/regression/fun_param_wildcard_frame.move:59:9
+   │
+59 │         ensures R[a].value == old(R[a].value);
+   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:53: forwarded
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:58: forwarded (spec)
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:53: forwarded
+   =         fv = <redacted>
+   =         a = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:54: forwarded
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:59: forwarded (spec)
+
+error: post-condition does not hold
+   ┌─ tests/sources/regression/fun_param_wildcard_frame.move:89:9
+   │
+89 │         ensures R[a].value == old(R[a].value);
+   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:83: forwarded_at
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:88: forwarded_at (spec)
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:83: forwarded_at
+   =         fv = <redacted>
+   =         a = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:84: forwarded_at
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:89: forwarded_at (spec)
+
+error: post-condition does not hold
+   ┌─ tests/sources/regression/fun_param_wildcard_frame.move:99:9
+   │
+99 │         ensures R[a].value == old(R[a].value);
+   │         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   │
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:93: addressed
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:98: addressed (spec)
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:93: addressed
+   =         fv = <redacted>
+   =         a = <redacted>
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:94: addressed
+   =     at tests/sources/regression/fun_param_wildcard_frame.move:99: addressed (spec)

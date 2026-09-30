@@ -62,6 +62,12 @@ pub struct UsageState {
     /// so callers must resolve the wildcard against *their* accessed
     /// footprint at each use site (loop-header havoc, Invoke, etc.).
     pub invoke_frame_wildcard: bool,
+    /// `invoke_frame` without the enclosing function's own parameter frames: the
+    /// struct-field frames and the callees' `invoke_frame`s. At a call site, the
+    /// parameter frames can be replaced by what the arguments actually modify.
+    pub invoke_frame_other: SetDomain<QualifiedInstId<StructId>>,
+    /// Like `invoke_frame_wildcard`, restricted to the sources of `invoke_frame_other`.
+    pub invoke_frame_other_wildcard: bool,
     /// The memory mentioned by the assume expressions in this function.
     pub assumed: MemoryUsage,
     /// The memory mentioned by the assert expressions in this function.
@@ -202,8 +208,12 @@ impl UsageState {
         self.add_transitive_modified_iter(callee.modified.get_all_inst(inst).into_iter());
         self.add_transitive_assumed_iter(callee.assumed.get_all_inst(inst).into_iter());
         self.add_transitive_asserted_iter(callee.asserted.get_all_inst(inst).into_iter());
-        self.add_transitive_invoke_frame_iter(callee.invoke_frame.get_all_inst(inst).into_iter());
+        let callee_invoke_frame = callee.invoke_frame.get_all_inst(inst);
+        self.invoke_frame_other
+            .extend(callee_invoke_frame.iter().cloned());
+        self.add_transitive_invoke_frame_iter(callee_invoke_frame.into_iter());
         self.invoke_frame_wildcard |= callee.invoke_frame_wildcard;
+        self.invoke_frame_other_wildcard |= callee.invoke_frame_wildcard;
     }
 }
 
@@ -386,12 +396,15 @@ impl MemoryUsageAnalysis<'_> {
                     }
                     if access.frame_spec.modifies_all {
                         wildcard = true;
+                        state.invoke_frame_other_wildcard = true;
                     }
                     for mem in &access.old_memory {
                         if mem_is_closed(mem) {
                             state.add_direct_invoke_frame(mem.clone());
+                            state.invoke_frame_other.insert(mem.clone());
                         } else {
                             wildcard = true;
+                            state.invoke_frame_other_wildcard = true;
                         }
                     }
                 }

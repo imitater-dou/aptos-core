@@ -1635,6 +1635,44 @@ pub fn boogie_behavioral_fun_result_name(
     format!("$bp_ensures_of_result{}'{}'", plural, fun_name)
 }
 
+/// (used_memory, old_memory) of a function-typed parameter, from its `modifies_of`/`reads_of`
+/// declaration. A wildcard covers all memory, which `modifies_of<f> *` may also write.
+pub fn fun_param_memory(
+    env: &GlobalEnv,
+    fun_qid: &QualifiedInstId<FunId>,
+    param_sym: Symbol,
+) -> (
+    BTreeSet<QualifiedInstId<StructId>>,
+    BTreeSet<QualifiedInstId<StructId>>,
+) {
+    use move_prover_bytecode_pipeline::mono_analysis;
+
+    let fun_env = env.get_function(fun_qid.to_qualified_id());
+    let param_access = fun_env.get_fun_param_access_of();
+    let Some(access) = param_access.iter().find(|a| a.fun_param == param_sym) else {
+        return (BTreeSet::new(), BTreeSet::new());
+    };
+    let mut used: BTreeSet<_> = access
+        .used_memory
+        .iter()
+        .map(|m| m.clone().instantiate(&fun_qid.inst))
+        .collect();
+    let mut old: BTreeSet<_> = access
+        .old_memory
+        .iter()
+        .map(|m| m.clone().instantiate(&fun_qid.inst))
+        .collect();
+    if access.frame_spec.modifies_all || access.frame_spec.reads_all {
+        for qid in mono_analysis::get_info(env).all_memory_qids(env) {
+            if access.frame_spec.modifies_all {
+                old.insert(qid.clone());
+            }
+            used.insert(qid);
+        }
+    }
+    (used, old)
+}
+
 /// Compute the union of (used_memory, old_memory) for all closure/param/field
 /// variants matching the given function type in MonoInfo.
 /// This is used by the Boogie code generator for emitting memory arguments in
@@ -1677,18 +1715,9 @@ pub fn compute_evaluator_memory_union(
             continue;
         }
         for info in param_infos {
-            let fun_env = env.get_function(info.fun.to_qualified_id());
-            for access in fun_env.get_fun_param_access_of() {
-                if access.fun_param == info.param_sym {
-                    for mem in &access.used_memory {
-                        union_used_memory.insert(mem.clone().instantiate(&info.fun.inst));
-                    }
-                    for mem in &access.old_memory {
-                        union_old_memory.insert(mem.clone().instantiate(&info.fun.inst));
-                    }
-                    break;
-                }
-            }
+            let (used, old) = fun_param_memory(env, &info.fun, info.param_sym);
+            union_used_memory.extend(used);
+            union_old_memory.extend(old);
         }
     }
 
